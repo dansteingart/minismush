@@ -1,0 +1,164 @@
+<!doctype html>
+<html>
+  <head>
+    <title>now, listen!</title>
+    <style>
+      * { margin: 10; padding: 10; box-sizing: border-box; }
+      body { font: 13px Helvetica, Arial; background-color: black; }
+      form { background: #000; padding: 3px; position: fixed; top: 0; width: 90%; }
+      form input { border: 0; padding: 0px; width: 90%; margin-right: .5%;  }
+      form button { width: 9%; background: rgb(148, 186, 131); border: none; padding: 5px; height:30px; color:darkgreen;outline:none}
+	    .messages{
+        margin-top:50px;
+        font-family: 'Monaco';
+        white-space: pre-line; 
+        background-color: black;
+        color: green;
+      }
+      input {height: 30px; background-color: darkgreen; color: lightgreen;outline: none; margin: 10; }
+      #growing-div {
+            position: fixed;
+            top: 200;
+            left: 0;
+            height: 200px;
+            width: 0; /* Start with 0 width */
+            max-width: 300px; /* Ensure it doesn’t grow beyond 200px */
+            background-color: rgba(0,0,0,.7);
+            color: green;
+            box-shadow: 3px 0 5px darkgreen;
+            overflow: hidden;
+        }
+        .serialbox{padding:5px 10px 5px 10px;}
+
+        #sliding-div.active {
+            right: 0; /* Slide into view */
+        }
+        input {height: 30px; background-color: darkgreen; color: lightgreen; border: 0; outline: none; margin: 10; }
+        button { width: 50%; background: rgb(148, 186, 131); border: none; padding: 5px; height:30px; color:darkgreen}
+        form button:hover, button:hover {color:lightgreen;background: darkgreen;}
+        form button:active, button:active {color:lightgreen;background: green;}
+
+        select {height: 30px; background-color: darkgreen; color: lightgreen; border: 0; outline: none; margin: 10; padding:0;}
+
+    </style>
+  </head>
+  <body>
+    <div id="growing-div">
+        <div class="serialbox">serial port connection</div>
+        <div class="serialbox"><select id="ports"      style="width:200px"></select> port</div>
+        <div class="serialbox"><input id="baud"/       style="width:200px"> baud</div>
+        <div class="serialbox"><button id="connect"    style="width:100px">connect</button><button id="disconnect" style="width:100px">disconnect</button></div>
+
+    </div>
+
+    <form autocomplete="on" action="">
+      <input id="m"/><button>send</button>
+    </form>    
+	<div id="messages" class="messages"></div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/static/jquery.js"></script>
+    <script>
+
+    $.get("/list_ports",(ports)=>{ports.forEach(port => {$("#ports").append(`<option value="${port.path}">${port.path}</option>`);});})
+    $("#connect").click(()=>{$.post("/reconnect",{'sp':$("#ports").val(),'baud':$("#baud").val()})})
+    $("#disconnect").click(()=>{$.get("/disconnect");});
+
+	function ab2str(buf) {
+	  str = String.fromCharCode.apply(null, new Uint8Array(buf));
+	  str = str.replace(/\n/g, '<br>');
+	  
+	  return str
+	}
+	
+	//$.get( "read/", function( data ) {$( "#messages").html(data.replace(/\n/g,'<br>') );});
+	
+  var socket = io();
+  $('form').submit(function()
+    {
+      socket.emit('input', $('#m').val()); 
+      localhist.unshift( $('#m').val())
+      console.log($('#m').val()) 
+      $('#m').val('');
+      mv = -1;
+      return false;
+    });
+    
+  /*
+    The goal is to display a window sized history of what the serial port is reporting, 
+    regardless of what line breaks are flowing through. We do this by 
+    - buffering msg into msg_wait
+    - defining a maximum number of lines based on window height
+    - if we're not getting line breaks, buffer until max_len and cut it there
+    - display the string on update
+  */
+  msg_wait = "" //msg buffer
+  localhist = []
+
+  max_len = 10000; //fall back if serial isn't spitting out line breaks
+  h_ratio = 85/1500; //assume 85 lines per 1500 pixels of text
+  socket.on('data', function(msg){
+    max_lines = Math.floor(window.innerHeight * h_ratio)-5; //the -5 keeps things neat when window height is small
+    msg_wait += msg //buffer
+    $('#messages').html(msg_wait); //display
+
+    //filter accordingly
+    if ((msg_wait.match(/\n/g)||[]).length > max_lines) 
+    {
+      while ((msg_wait.match(/\n/g)||[]).length > max_lines) msg_wait = msg_wait.substr(msg_wait.search("\n")+1)
+    }
+    else if (msg_wait.length > max_len)
+    {
+      msg_wait = msg_wait.substr(msg_wait.length-max_len)
+    }
+
+	});
+  
+
+  mv = 0;
+  fart = undefined
+  connectconsole = false
+  $(window).on("keydown",(data)=>{
+    fart =data
+    console.log(data)
+    if (data['originalEvent']['code'] == "F1")
+    {
+       if (!connectconsole) $('#growing-div').animate({ width: '300px' }, 50);
+       else $('#growing-div').animate({ width: '0px' }, 50);
+       connectconsole = !connectconsole;
+    }
+  })
+  $( "#m" ).on( "keydown", (data)=>{
+    ev = data['originalEvent']['code']
+    if (ev == "ArrowUp") 
+    { 
+      mv = mv+1;
+      if (mv >= localhist.length) mv = 0;
+      $( "#m" ).val(localhist[mv])
+    }
+    if (ev == "ArrowDown")
+    {
+      mv = mv-1
+      if (mv < 0) mv = localhist.length-1;
+      $( "#m" ).val(localhist[mv])
+    }
+    console.log(mv)
+    })
+
+
+                // Close the div when clicking outside of it
+                $(document).click(function (event) {
+                const $div = $('#growing-div');
+                if (connectconsole && !$(event.target).closest('#growing-div').length) {
+                    $div.animate({ width: '0px' }, 100); // Shrink to 0px
+                    connectconsole = false;
+                }
+            });
+
+            // Prevent clicks inside the div from triggering the close
+            $('#growing-div').click(function (event) {
+                event.stopPropagation();
+            });
+  </script>
+  </body>
+</html>
