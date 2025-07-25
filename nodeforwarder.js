@@ -113,6 +113,14 @@ function msleep(n) {
 			}
 		}
 		
+		// Handle cycler data processing if cycler is running
+		if (cyclerState.isRunning && !cyclerState.isPaused) {
+			const dataString = data.toString('utf8').trim();
+			if (dataString) {
+				parseCyclerStreamingData(dataString);
+			}
+		}
+		
 		});
   
 	  serialPort.on('error', (err) => {
@@ -290,7 +298,7 @@ app.get('/write/*',function(req,res){
 	toSend = req.originalUrl.replace("/write/","")
 	toSend = decodeURIComponent(toSend);
 	console.log(toSend)
-	serialPort.write(toSend)
+	writeout(toSend)
 	res.send(toSend)
 });
 
@@ -309,7 +317,7 @@ app.get('/writecf/*',function(req,res){
 	toSend = req.originalUrl.replace("/writecf/","")
 	toSend = decodeURIComponent(toSend);
 	console.log(toSend)
-	serialPort.write(toSend+"\r\n")
+	writeout(toSend,le="\r\n")
 	res.send(toSend)
 });
 
@@ -318,7 +326,7 @@ app.post('/write',function(req,res){
 	x = req.body
 	toSend = x['payload']
 	console.log(toSend)
-	serialPort.write(toSend)
+	writeout(toSend)
 	res.send(toSend)
 });
 
@@ -470,18 +478,168 @@ io.on('connection', function(socket){
   io.emit('data',buf)
   socket.on('input', function(msg){
    //console.log('message: ' + msg);
-	serialPort.write(msg+"\r\n")
+	writeout(msg,le="\r\n")
 	
   });
 });
 
+// Enhanced socket handling for cycler streaming data
+io.on('connection', function(socket){
+  // WebSocket connection established
+});
+
+// Parse streaming data from serial buffer for battery cycler
+function parseCyclerStreamingData(dataString) {
+  if (!cyclerState.isRunning || cyclerState.isPaused) return;
+  
+  try {
+    // Filter out non-measurement data
+    // Skip timestamps (contain : or large numbers like unix timestamps)
+    if (dataString.includes(':') || /^\d{10,}$/.test(dataString.trim())) {
+      return; // Skip timestamp data
+    }
+    
+    // Skip command responses and status messages
+    if (dataString.includes('OK') || dataString.includes('ERROR') || 
+        dataString.includes('MEAS') || dataString.includes('SOUR') ||
+        dataString.includes('OUTP') || dataString.length > 50) {
+      return; // Skip command acknowledgments and long messages
+    }
+    
+    let voltage = null;
+    let current = null;
+    
+    // Check if data looks like voltage,current format (e.g., "3.345,0.0123" or "3.836209,9.659207e-10")
+    if (dataString.includes(',')) {
+      const parts = dataString.split(',');
+      if (parts.length === 2) {
+        const v = parseFloat(parts[0].trim());
+        const i = parseFloat(parts[1].trim());
+        
+        // Validate reasonable ranges for battery measurements
+        if (!isNaN(v) && !isNaN(i) && 
+            Math.abs(v) >= 0.1 && Math.abs(v) <= 50 && // Voltage range 0.1V to 50V
+            Math.abs(i) <= 100) { // Current range up to 100A
+          voltage = v;
+          current = i;
+        }
+      }
+    }
+    // Check if data looks like a single voltage value (for OCV/REST)
+    else {
+      const v = parseFloat(dataString.trim());
+      if (!isNaN(v) && v >= 0.1 && v <= 50) { // Reasonable voltage range for batteries
+        voltage = v;
+        current = 0; // Assume zero current for voltage-only measurements
+      }
+    }
+    
+    // If we got valid measurement data, process it
+    if (voltage !== null) {
+      // Store the latest streaming data
+      cyclerState.lastStreamingData = {
+        voltage: voltage,
+        current: current,
+        timestamp: Date.now()
+      };
+      
+      console.log(`Cycler measurement: ${voltage.toFixed(6)}V, ${current.toExponential(6)}A`);
+      
+      // Process the data for logging and cutoff checking
+      processCyclerData(voltage, current);
+    }
+    
+  } catch (error) {
+    // Ignore parsing errors - not all serial data is measurement data
+    console.log(`Skipping unparseable data: "${dataString}"`);
+  }
+}
+
+
+// Process cycler data from streaming
+function processCyclerData(voltage, current) {
+  const now = Date.now();
+  const stepTime = (now - cyclerState.stepStartTime) / 1000;
+  const totalTime = (now - cyclerState.startTime) / 1000;
+  
+  // Update Ah integration
+  updateAhIntegration(current, now);
+  
+  // Create data point
+  const dataPoint = {
+    timestamp: new Date().toISOString(),
+    cycle: cyclerState.currentCycle,
+    step: cyclerState.currentStepIndex,
+    step_type: cyclerState.currentStep ? cyclerState.currentStep.mode : 'unknown',
+    step_time: stepTime,
+    total_time: totalTime,
+    voltage: voltage,
+    current: current,
+    step_ah: cyclerState.stepAh,
+    cycle_ah: cyclerState.cycleAh,
+    total_ah: cyclerState.totalAh
+  };
+  
+  cyclerState.stepData.push(dataPoint);
+  
+  // Write to SQLite database if logging enabled
+  if (cyclerState.cyclerDataStmt) {
+    try {
+      cyclerState.cyclerDataStmt.run(
+        dataPoint.timestamp,
+        now,
+        dataPoint.cycle,
+        dataPoint.step,
+        dataPoint.step_type,
+        dataPoint.step_time,
+        dataPoint.total_time,
+        dataPoint.voltage,
+        dataPoint.current,
+        dataPoint.step_ah,
+        dataPoint.cycle_ah,
+        dataPoint.total_ah,
+        null, // temperature_c
+        null  // notes
+      );
+    } catch (err) {
+      console.error('Cycler SQLite write error:', err);
+    }
+  }
+  
+  // Also write to CSV for compatibility
+  if (cyclerState.cyclerCsvWriter) {
+    cyclerState.cyclerCsvWriter.writeRecords([dataPoint]).catch(err => {
+      console.error('Cycler CSV write error:', err);
+    });
+  }
+  
+  // Emit real-time data
+  io.emit('cycler_data', dataPoint);
+  
+  // Check cutoff conditions
+  if (cyclerState.currentStep && checkStepCutoffs(voltage, current, stepTime)) {
+    advanceToNextStep();
+  }
+}
+
 
 //smu helpder functions
+function writeout(s,le="\r\n")
+{
+  //console.log(`[SERIAL OUT] ${s}`);
+  serialPort.write(s+le);
+}
+
 
 smu_mode = undefined;
-function response(res) { setTimeout(()=>{res.send(buf.split("\n").slice(-2)[0])},200);}
+function response(res) { 
+  setTimeout(()=>{
+    ress = buf.split("\n").slice(-2)[0]
+    res.send({'result':ress})
+  },200);
+}
 
-function get_identity(){ serialPort.write("*IDN?") }
+function get_identity(){ writeout("*IDN?") }
 
 app.get('/smu/get_identity', (req,res)=>
   {
@@ -489,51 +647,51 @@ app.get('/smu/get_identity', (req,res)=>
      response(res);
   });
 
-function set_mode(ch,mode) {serialPort.write(`SOUR${ch}:${mode} ENA`)}
+function set_mode(ch,mode) {writeout(`SOUR${ch}:${mode} ENA`)}
 
 function set_current(ch,cur)
 {
   if (smu_mode !=  "FIMV") set_mode(ch,'FIMV');
-  serialPort.write(`SOUR${ch}:CURR ${cur}`)
+  writeout(`SOUR${ch}:CURR ${cur}`)
 }
 
 function set_potential(ch,pot)
 {
   if (smu_mode !=  "FVMI") set_mode(ch,'FVMI');
-  serialPort.write(`SOUR${ch}:VOLT ${pot}`)
+  writeout(`SOUR${ch}:VOLT ${pot}`)
 }
 
 // Measurement Functions
-function measure_voltage(ch) { serialPort.write(`MEAS${ch}:VOLT?`) }
-function measure_current(ch) { serialPort.write(`MEAS${ch}:CURR?`) }
-function measure_voltage_and_current(ch) { serialPort.write(`MEAS${ch}:VOLT:CURR?`) }
+function measure_voltage(ch) { write(`MEAS${ch}:VOLT?`) }
+function measure_current(ch) { writeout(`MEAS${ch}:CURR?`) }
+function measure_voltage_and_current(ch) { writeout(`MEAS${ch}:VOLT:CURR?`) }
 
 // Channel Control Functions
-function enable_channel(ch) { serialPort.write(`OUTP${ch} ON`) }
-function disable_channel(ch) { serialPort.write(`OUTP${ch} OFF`) }
-function set_voltage_range(ch, range) { serialPort.write(`SOUR${ch}:VOLT:RANGE ${range}`) }
-function reset_device() { serialPort.write("*RST") }
+function enable_channel(ch) { writeout(`OUTP${ch} ON`); }
+function disable_channel(ch) { writeout(`OUTP${ch} OFF`) }
+function set_voltage_range(ch, range) { writeout(`SOUR${ch}:VOLT:RANGE ${range}`) }
+function reset_device() { writeout("*RST") }
 
 // Data Streaming Functions
-function start_streaming(ch) { serialPort.write(`SOUR${ch}:DATA:STREAM ON`) }
-function stop_streaming(ch) { serialPort.write(`SOUR${ch}:DATA:STREAM OFF`) }
-function set_sample_rate(ch, rate) { serialPort.write(`SOUR${ch}:DATA:SRATE ${rate}`) }
+function start_streaming(ch) { writeout(`SOUR${ch}:DATA:STREAM ON`) }
+function stop_streaming(ch) { writeout(`SOUR${ch}:DATA:STREAM OFF`) }
+function set_sample_rate(ch, rate) { writeout(`SOUR${ch}:DATA:SRATE ${rate}`) }
 
 // System Functions
-function set_led_brightness(brightness) { serialPort.write(`SYST:LED ${brightness}`) }
-function get_led_brightness() { serialPort.write("SYST:LED?") }
-function get_temperatures() { serialPort.write("SYST:TEMP?") }
-function set_time(timestamp) { serialPort.write(`SYST:TIME ${timestamp}`) }
+function set_led_brightness(brightness) { writeout(`SYST:LED ${brightness}`) }
+function get_led_brightness() { writeout("SYST:LED?") }
+function get_temperatures() { writeout("SYST:TEMP?") }
+function set_time(timestamp) { writeout(`SYST:TIME ${timestamp}`) }
 
 // WiFi Functions
-function wifi_scan() { serialPort.write("SYST:WIFI:SCAN?") }
-function get_wifi_status() { serialPort.write("SYST:WIFI?") }
+function wifi_scan() { writeout("SYST:WIFI:SCAN?") }
+function get_wifi_status() { writeout("SYST:WIFI?") }
 function set_wifi_credentials(ssid, password) { 
-  serialPort.write(`SYST:WIFI:SSID "${ssid}"`)
-  serialPort.write(`SYST:WIFI:PASS "${password}"`)
+  writeout(`SYST:WIFI:SSID "${ssid}"`)
+  writeout(`SYST:WIFI:PASS "${password}"`)
 }
-function enable_wifi() { serialPort.write("SYST:WIFI ENA") }
-function disable_wifi() { serialPort.write("SYST:WIFI DIS") }
+function enable_wifi() { writeout("SYST:WIFI ENA") }
+function disable_wifi() { writeout("SYST:WIFI DIS") }
 
 app.post("/smu/set_potential",(req,res) => {
   try {
@@ -815,3 +973,924 @@ app.post("/smu/disable_wifi", (req,res) => {
     res.status(500).json({ error: 'Failed to disable WiFi' });
   }
 })
+
+// ============================================================================
+// SMU DOCUMENTATION WEB INTERFACE
+// ============================================================================
+
+const marked = require('marked');
+const path = require('path');
+
+// SMU documentation page
+app.get('/smu', (req, res) => {
+  try {
+    const markdownPath = path.join(__dirname, 'static', 'smu_documentation.md');
+    const markdownContent = fs.readFileSync(markdownPath, 'utf8');
+    
+    // Configure marked options for better rendering
+    marked.setOptions({
+      breaks: true,
+      gfm: true,
+      tables: true,
+      sanitize: false
+    });
+    
+    const htmlContent = marked.parse(markdownContent);
+    
+    // Create a complete HTML page with styling
+    const fullHtml = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SMU API Documentation - minismush</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Helvetica Neue', Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f8f9fa;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #2c3e50;
+            border-bottom: 3px solid #3498db;
+            padding-bottom: 10px;
+        }
+        h2 {
+            color: #34495e;
+            border-bottom: 1px solid #ecf0f1;
+            padding-bottom: 5px;
+            margin-top: 30px;
+        }
+        h3 {
+            color: #7f8c8d;
+            margin-top: 25px;
+        }
+        code {
+            background-color: #f4f4f4;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+            font-size: 0.9em;
+        }
+        pre {
+            background-color: #2c3e50;
+            color: #ecf0f1;
+            padding: 15px;
+            border-radius: 5px;
+            overflow-x: auto;
+            margin: 15px 0;
+        }
+        pre code {
+            background: none;
+            padding: 0;
+            color: inherit;
+        }
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 15px 0;
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 12px;
+            text-align: left;
+        }
+        th {
+            background-color: #f2f2f2;
+            font-weight: bold;
+        }
+        .endpoint {
+            background-color: #e8f5e8;
+            padding: 10px;
+            border-left: 4px solid #27ae60;
+            margin: 10px 0;
+        }
+        .method {
+            font-weight: bold;
+            color: #e74c3c;
+        }
+        .nav {
+            background-color: #34495e;
+            padding: 15px;
+            margin: -30px -30px 30px -30px;
+            border-radius: 8px 8px 0 0;
+        }
+        .nav h1 {
+            color: white;
+            margin: 0;
+            border: none;
+            padding: 0;
+        }
+        .nav p {
+            color: #bdc3c7;
+            margin: 5px 0 0 0;
+        }
+        .back-link {
+            display: inline-block;
+            background-color: #3498db;
+            color: white;
+            padding: 8px 16px;
+            text-decoration: none;
+            border-radius: 4px;
+            margin-bottom: 20px;
+        }
+        .back-link:hover {
+            background-color: #2980b9;
+        }
+        ul li {
+            margin: 8px 0;
+        }
+        blockquote {
+            border-left: 4px solid #3498db;
+            margin: 15px 0;
+            padding: 10px 20px;
+            background-color: #f8f9fa;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="nav">
+            <h1>🔋 minismush SMU API</h1>
+            <p>Complete API reference for Source Measure Unit control and battery cycling</p>
+        </div>
+        
+        <a href="/" class="back-link">← Back to Console</a>
+        
+        ${htmlContent}
+        
+        <hr style="margin: 40px 0; border: none; border-top: 1px solid #ecf0f1;">
+        <p style="text-align: center; color: #7f8c8d; font-size: 0.9em;">
+            Generated from <code>static/smu_documentation.md</code> • 
+            <a href="/console" style="color: #3498db;">Console Interface</a> • 
+            <a href="/connect" style="color: #3498db;">Connection Manager</a>
+        </p>
+    </div>
+</body>
+</html>`;
+    
+    res.send(fullHtml);
+    
+  } catch (error) {
+    console.error('Error rendering SMU documentation:', error);
+    res.status(500).send(`
+      <html>
+        <body style="font-family: Arial, sans-serif; padding: 20px;">
+          <h1>Error Loading Documentation</h1>
+          <p>Could not load SMU API documentation. Error: ${error.message}</p>
+          <p><a href="/">← Back to Console</a></p>
+        </body>
+      </html>
+    `);
+  }
+});
+
+// ============================================================================
+// BATTERY CYCLER FUNCTIONALITY
+// ============================================================================
+
+// Battery Cycler State Management
+let cyclerState = {
+  isRunning: false,
+  isPaused: false,
+  channel: null,
+  steps: [],
+  currentStepIndex: 0,
+  currentCycle: 0,
+  totalCycles: 0,
+  startTime: null,
+  stepStartTime: null,
+  lastMeasurementTime: null,
+  
+  // Integrators and counters
+  totalAh: 0,           // Total Ah since start
+  stepAh: 0,            // Ah for current step
+  cycleAh: 0,           // Ah for current cycle
+  lastCurrent: 0,       // Last measured current for integration
+  
+  // Current step data
+  currentStep: null,
+  stepData: [],         // Data points for current step
+  
+  // Logging
+  cyclerLogFile: null,
+  cyclerCsvFile: null,
+  cyclerCsvWriter: null,
+  cyclerDb: null,
+  cyclerDataStmt: null,
+  
+  // Streaming data
+  lastStreamingData: null
+};
+
+// Amp-hour integrator using trapezoidal rule
+function updateAhIntegration(current, timestamp) {
+  if (cyclerState.lastMeasurementTime === null) {
+    cyclerState.lastMeasurementTime = timestamp;
+    cyclerState.lastCurrent = current;
+    return;
+  }
+  
+  const deltaTimeHours = (timestamp - cyclerState.lastMeasurementTime) / (1000 * 3600);
+  const avgCurrent = (current + cyclerState.lastCurrent) / 2;
+  const deltaAh = avgCurrent * deltaTimeHours;
+  
+  cyclerState.totalAh += deltaAh;
+  cyclerState.stepAh += deltaAh;
+  cyclerState.cycleAh += deltaAh;
+  
+  cyclerState.lastMeasurementTime = timestamp;
+  cyclerState.lastCurrent = current;
+}
+
+// Step validation and parsing
+function validateCyclerSteps(steps) {
+  if (!Array.isArray(steps)) {
+    throw new Error('Steps must be an array');
+  }
+  
+  let cycleStartFound = false;
+  let cycleEndFound = false;
+  
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i];
+    
+    if (step.cycle === 'start') {
+      cycleStartFound = true;
+      continue;
+    }
+    
+    if (step.cycle === 'end') {
+      cycleEndFound = true;
+      continue;
+    }
+    
+    // Validate step modes
+    if (!['cc', 'cv', 'ocv', 'rest'].includes(step.mode)) {
+      throw new Error(`Invalid step mode: ${step.mode} at step ${i}`);
+    }
+    
+    // Validate cutoff conditions
+    if (step.mode === 'cc') {
+      if (step.current === undefined) {
+        throw new Error(`CC step missing current at step ${i}`);
+      }
+    }
+    
+    if (step.mode === 'cv') {
+      if (step.voltage === undefined) {
+        throw new Error(`CV step missing voltage at step ${i}`);
+      }
+    }
+  }
+  
+  if (!cycleStartFound) {
+    throw new Error('Cycle definition must include {"cycle":"start"}');
+  }
+  
+  if (!cycleEndFound) {
+    throw new Error('Cycle definition must include {"cycle":"end"}');
+  }
+  
+  return true;
+}
+
+// Initialize cycler logging with SQLite database
+function initializeCyclerLogging(testMetadata = {}) {
+  if (cyclerState.cyclerLogFile) {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const sqliteFilename = `battery_test_${timestamp}.db`;
+    const csvFilename = `battery_test_${timestamp}.csv`;
+    
+    // Create SQLite database
+    cyclerState.cyclerDb = new sqlite3.Database(sqliteFilename);
+    
+    // Use serialize to ensure tables are created before proceeding
+    cyclerState.cyclerDb.serialize(() => {
+      // Create metadata table
+      cyclerState.cyclerDb.run(`
+        CREATE TABLE IF NOT EXISTS metadata (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          key TEXT UNIQUE NOT NULL,
+          value TEXT,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+      `);
+      
+      // Create data table
+      cyclerState.cyclerDb.run(`
+        CREATE TABLE IF NOT EXISTS data (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          timestamp DATETIME NOT NULL,
+          unix_timestamp INTEGER NOT NULL,
+          cycle INTEGER NOT NULL,
+          step INTEGER NOT NULL,
+          step_type TEXT NOT NULL,
+          step_time_s REAL NOT NULL,
+          total_time_s REAL NOT NULL,
+          voltage_v REAL,
+          current_a REAL,
+          step_ah REAL NOT NULL,
+          cycle_ah REAL NOT NULL,
+          total_ah REAL NOT NULL,
+          temperature_c REAL,
+          notes TEXT,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+      `);
+      
+      // Insert test metadata (after tables are created)
+      const defaultMetadata = {
+        test_name: testMetadata.testName || 'Battery Cycling Test',
+        test_type: testMetadata.testType || 'cycling',
+        channel: cyclerState.channel.toString(),
+        total_cycles: cyclerState.totalCycles.toString(),
+        start_time: new Date().toISOString(),
+        operator: testMetadata.operator || 'system',
+        battery_id: testMetadata.batteryId || 'unknown',
+        battery_type: testMetadata.batteryType || 'unknown',
+        capacity_ah: testMetadata.capacityAh ? testMetadata.capacityAh.toString() : 'unknown',
+        temperature_c: testMetadata.temperatureC ? testMetadata.temperatureC.toString() : 'ambient',
+        notes: testMetadata.notes || '',
+        step_definition: JSON.stringify(cyclerState.steps),
+        software_version: 'minismush-1.0',
+        data_format_version: '1.0'
+      };
+      
+      // Insert metadata
+      const metadataStmt = cyclerState.cyclerDb.prepare('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)');
+      for (const [key, value] of Object.entries(defaultMetadata)) {
+        metadataStmt.run(key, value);
+      }
+      metadataStmt.finalize();
+      
+      // Prepare data insert statement (after tables are created)
+      cyclerState.cyclerDataStmt = cyclerState.cyclerDb.prepare(`
+        INSERT INTO data (
+          timestamp, unix_timestamp, cycle, step, step_type, step_time_s, total_time_s,
+          voltage_v, current_a, step_ah, cycle_ah, total_ah, temperature_c, notes
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+    });
+    
+    // Also maintain CSV logging for compatibility
+    const csvHeaders = [
+      { id: 'timestamp', title: 'Timestamp' },
+      { id: 'cycle', title: 'Cycle' },
+      { id: 'step', title: 'Step' },
+      { id: 'step_type', title: 'Step_Type' },
+      { id: 'step_time', title: 'Step_Time_s' },
+      { id: 'total_time', title: 'Total_Time_s' },
+      { id: 'voltage', title: 'Voltage_V' },
+      { id: 'current', title: 'Current_A' },
+      { id: 'step_ah', title: 'Step_Ah' },
+      { id: 'cycle_ah', title: 'Cycle_Ah' },
+      { id: 'total_ah', title: 'Total_Ah' }
+    ];
+    
+    cyclerState.cyclerCsvWriter = createCsvWriter({
+      path: csvFilename,
+      header: csvHeaders,
+      append: false
+    });
+    
+    cyclerState.cyclerLogFile = sqliteFilename;
+    cyclerState.cyclerCsvFile = csvFilename;
+    
+    console.log(`Battery test logging initialized:`);
+    console.log(`  SQLite: ${sqliteFilename}`);
+    console.log(`  CSV: ${csvFilename}`);
+  }
+}
+
+// Determine the expected current direction for CV steps based on voltage and historical data
+function determineCVDirection(stepVoltage, currentVoltage, initialCurrent) {
+  // If we have an initial current measurement, use its sign as the primary indicator
+  if (initialCurrent !== undefined && initialCurrent !== 0) {
+    return Math.sign(initialCurrent);
+  }
+  
+  // Otherwise, predict based on voltage difference
+  // If step voltage > current voltage, expect positive current (charging)
+  // If step voltage < current voltage, expect negative current (discharging)
+  if (stepVoltage > currentVoltage) {
+    return 1; // Charging (positive current expected)
+  } else if (stepVoltage < currentVoltage) {
+    return -1; // Discharging (negative current expected)
+  }
+  
+  // If voltages are equal, assume maintenance (could be either direction)
+  return 0;
+}
+
+// Check if current step cutoff conditions are met
+function checkStepCutoffs(voltage, current, stepTime) {
+  const step = cyclerState.currentStep;
+  if (!step) return false;
+  
+  // Voltage cutoffs (same for all modes)
+  if (step.cutoff_V !== undefined) {
+    if (step.mode === 'cc') {
+      // CC mode: directional voltage cutoffs
+      if ((step.current > 0 && voltage >= step.cutoff_V) ||
+          (step.current < 0 && voltage <= step.cutoff_V)) {
+        console.log(`CC voltage cutoff reached: ${voltage}V (target: ${step.cutoff_V}V)`);
+        return true;
+      }
+    } else if (step.mode === 'cv') {
+      // CV mode: voltage should be held constant, cutoff_V acts as tolerance check
+      if (Math.abs(voltage - step.voltage) > Math.abs(step.cutoff_V)) {
+        console.log(`CV voltage tolerance exceeded: ${voltage}V (target: ${step.voltage}V, tolerance: ${step.cutoff_V}V)`);
+        return true;
+      }
+    }
+  }
+  
+  if (step.cutoff_V_min !== undefined && voltage <= step.cutoff_V_min) {
+    console.log(`Minimum voltage cutoff reached: ${voltage}V (min: ${step.cutoff_V_min}V)`);
+    return true;
+  }
+  
+  if (step.cutoff_V_max !== undefined && voltage >= step.cutoff_V_max) {
+    console.log(`Maximum voltage cutoff reached: ${voltage}V (max: ${step.cutoff_V_max}V)`);
+    return true;
+  }
+  
+  // Current cutoffs with directional logic
+  if (step.cutoff_A !== undefined) {
+    if (step.mode === 'cc') {
+      // CC mode: simple absolute value check
+      if (Math.abs(current) <= Math.abs(step.cutoff_A)) {
+        console.log(`CC current cutoff reached: ${current}A (target: ${step.cutoff_A}A)`);
+        return true;
+      }
+    } else if (step.mode === 'cv') {
+      // CV mode: directional current cutoff
+      // Determine expected current direction for this CV step
+      const expectedDirection = determineCVDirection(step.voltage, voltage, cyclerState.stepData.length > 0 ? cyclerState.stepData[0].current : undefined);
+      
+      if (expectedDirection !== 0) {
+        // Check if current has dropped below cutoff in the expected direction
+        if (expectedDirection > 0) {
+          // Charging CV: check if positive current dropped below positive cutoff
+          if (step.cutoff_A > 0 && current <= step.cutoff_A && current >= 0) {
+            console.log(`CV charging current cutoff reached: ${current}A (cutoff: ${step.cutoff_A}A, charging)`);
+            return true;
+          }
+          // Or if current became negative (direction change)
+          if (current < 0) {
+            console.log(`CV charging direction change: ${current}A (was charging, now discharging)`);
+            return true;
+          }
+        } else {
+          // Discharging CV: check if negative current dropped below negative cutoff
+          if (step.cutoff_A < 0 && current >= step.cutoff_A && current <= 0) {
+            console.log(`CV discharging current cutoff reached: ${current}A (cutoff: ${step.cutoff_A}A, discharging)`);
+            return true;
+          }
+          // Or if current became positive (direction change)
+          if (current > 0) {
+            console.log(`CV discharging direction change: ${current}A (was discharging, now charging)`);
+            return true;
+          }
+        }
+      } else {
+        // Bidirectional or maintenance CV: check absolute value
+        if (Math.abs(current) <= Math.abs(step.cutoff_A)) {
+          console.log(`CV maintenance current cutoff reached: ${current}A (target: ${step.cutoff_A}A)`);
+          return true;
+        }
+      }
+    }
+  }
+  
+  // Ah cutoffs with directional logic
+  if (step.cutoff_Ah !== undefined) {
+    if (step.mode === 'cc') {
+      // CC mode: use absolute value for capacity-based cutoffs
+      if (Math.abs(cyclerState.stepAh) >= Math.abs(step.cutoff_Ah)) {
+        console.log(`CC capacity cutoff reached: ${cyclerState.stepAh}Ah (target: ${step.cutoff_Ah}Ah)`);
+        return true;
+      }
+    } else if (step.mode === 'cv') {
+      // CV mode: directional capacity cutoff
+      const expectedDirection = determineCVDirection(step.voltage, voltage, cyclerState.stepData.length > 0 ? cyclerState.stepData[0].current : undefined);
+      
+      if (expectedDirection > 0) {
+        // Charging CV: check positive Ah accumulation
+        if (step.cutoff_Ah > 0 && cyclerState.stepAh >= step.cutoff_Ah) {
+          console.log(`CV charging capacity cutoff reached: ${cyclerState.stepAh}Ah (target: ${step.cutoff_Ah}Ah)`);
+          return true;
+        }
+      } else if (expectedDirection < 0) {
+        // Discharging CV: check negative Ah accumulation
+        if (step.cutoff_Ah < 0 && cyclerState.stepAh <= step.cutoff_Ah) {
+          console.log(`CV discharging capacity cutoff reached: ${cyclerState.stepAh}Ah (target: ${step.cutoff_Ah}Ah)`);
+          return true;
+        }
+      } else {
+        // Bidirectional: use absolute value
+        if (Math.abs(cyclerState.stepAh) >= Math.abs(step.cutoff_Ah)) {
+          console.log(`CV bidirectional capacity cutoff reached: ${cyclerState.stepAh}Ah (target: ${step.cutoff_Ah}Ah)`);
+          return true;
+        }
+      }
+    }
+  }
+  
+  // Time cutoffs (same for all modes)
+  if (step.cutoff_time_s !== undefined && stepTime >= step.cutoff_time_s) {
+    console.log(`Time cutoff reached: ${stepTime}s (target: ${step.cutoff_time_s}s)`);
+    return true;
+  }
+  
+  return false;
+}
+
+// Execute current step - simplified to only set SMU mode, measurements come from streaming
+async function executeCurrentStep() {
+  if (!cyclerState.isRunning || cyclerState.isPaused) {
+    console.log(`Step execution skipped - running: ${cyclerState.isRunning}, paused: ${cyclerState.isPaused}`);
+    return;
+  }
+  
+  const step = cyclerState.currentStep;
+  if (!step) {
+    console.log(`No current step defined - currentStep:`, step);
+    return;
+  }
+  
+  console.log(`Setting SMU for step ${cyclerState.currentStepIndex}: ${step.mode}`);
+  
+  try {
+    // Set SMU based on step mode - measurements will come from streaming
+    switch (step.mode) {
+      case 'cc':
+        console.log(`Setting CC mode: ${step.current}A on channel ${cyclerState.channel}`);
+        console.log(`Calling enable_channel(${cyclerState.channel})`);
+        enable_channel(cyclerState.channel);
+        console.log(`Calling set_current(${cyclerState.channel}, ${step.current})`);
+        set_current(cyclerState.channel, step.current);
+        console.log(`Channel ${cyclerState.channel} enabled for CC step - commands sent`);
+        break;
+        
+      case 'cv':
+        console.log(`Setting CV mode: ${step.voltage}V on channel ${cyclerState.channel}`);
+        console.log(`Calling enable_channel(${cyclerState.channel})`);
+        enable_channel(cyclerState.channel);
+        console.log(`Calling set_potential(${cyclerState.channel}, ${step.voltage})`);
+        set_potential(cyclerState.channel, step.voltage);
+        console.log(`Channel ${cyclerState.channel} enabled for CV step - commands sent`);
+        break;
+        
+      case 'ocv':
+      case 'rest':
+        console.log(`Setting ${step.mode.toUpperCase()} mode on channel ${cyclerState.channel}`);
+        console.log(`Calling set_current(${cyclerState.channel}, 0) for ${step.mode}`);
+        // For OCV/REST, set current to zero (high impedance) but keep channel enabled for voltage measurement
+        set_current(cyclerState.channel, 0);
+        console.log(`Calling enable_channel(${cyclerState.channel})`);
+        enable_channel(cyclerState.channel);
+        console.log(`Channel ${cyclerState.channel} enabled for ${step.mode.toUpperCase()} step - commands sent`);
+        break;
+        
+      default:
+        console.log(`Unknown step mode: ${step.mode}`);
+        break;
+    }
+    
+    
+  } catch (error) {
+    console.error('Step execution error:', error);
+    stopCycler();
+  }
+}
+
+// Advance to next step
+function advanceToNextStep() {
+  console.log(`Completing step ${cyclerState.currentStepIndex}: ${cyclerState.currentStep.mode}`);
+  
+  // Reset step counters
+  cyclerState.stepAh = 0;
+  cyclerState.stepStartTime = Date.now();
+  cyclerState.stepData = [];
+  
+  // Find next step
+  cyclerState.currentStepIndex++;
+  
+  while (cyclerState.currentStepIndex < cyclerState.steps.length) {
+    const nextStep = cyclerState.steps[cyclerState.currentStepIndex];
+    
+    if (nextStep.cycle === 'end') {
+      // End of cycle - check if we should repeat
+      cyclerState.currentCycle++;
+      console.log(`Cycle ${cyclerState.currentCycle} completed`);
+      
+      // Reset cycle counters
+      cyclerState.cycleAh = 0;
+      
+      if (cyclerState.totalCycles === 0 || cyclerState.currentCycle < cyclerState.totalCycles) {
+        // Start next cycle
+        cyclerState.currentStepIndex = 0;
+        while (cyclerState.currentStepIndex < cyclerState.steps.length && 
+               cyclerState.steps[cyclerState.currentStepIndex].cycle !== 'start') {
+          cyclerState.currentStepIndex++;
+        }
+        cyclerState.currentStepIndex++; // Move past cycle start
+        continue;
+      } else {
+        // All cycles completed
+        console.log('All cycles completed');
+        stopCycler();
+        return;
+      }
+    }
+    
+    if (nextStep.cycle === 'start') {
+      cyclerState.currentStepIndex++;
+      continue;
+    }
+    
+    // Valid step found
+    cyclerState.currentStep = nextStep;
+    console.log(`Starting step ${cyclerState.currentStepIndex}: ${nextStep.mode}`);
+    return;
+  }
+  
+  // No more steps
+  console.log('Cycler sequence completed');
+  stopCycler();
+}
+
+// Start cycler
+function startCycler(channel, steps, cycles = 0, enableLogging = true, testMetadata = {}) {
+  if (cyclerState.isRunning) {
+    throw new Error('Cycler is already running');
+  }
+  
+  // Validate inputs
+  validateCyclerSteps(steps);
+  
+  // Initialize state
+  cyclerState.isRunning = true;
+  cyclerState.isPaused = false;
+  cyclerState.channel = channel;
+  cyclerState.steps = steps;
+  cyclerState.totalCycles = cycles;
+  cyclerState.currentCycle = 1;
+  cyclerState.currentStepIndex = 0;
+  cyclerState.startTime = Date.now();
+  cyclerState.stepStartTime = Date.now();
+  cyclerState.lastMeasurementTime = null;
+  
+  // Reset counters
+  cyclerState.totalAh = 0;
+  cyclerState.stepAh = 0;
+  cyclerState.cycleAh = 0;
+  cyclerState.lastCurrent = 0;
+  cyclerState.stepData = [];
+  
+  // Initialize logging
+  if (enableLogging) {
+    cyclerState.cyclerLogFile = true;
+    initializeCyclerLogging(testMetadata);
+  }
+  
+  // Find first actual step (skip cycle start)
+  while (cyclerState.currentStepIndex < steps.length && 
+         steps[cyclerState.currentStepIndex].cycle === 'start') {
+    cyclerState.currentStepIndex++;
+  }
+  
+  if (cyclerState.currentStepIndex >= steps.length) {
+    throw new Error('No valid steps found in cycle definition');
+  }
+  
+  cyclerState.currentStep = steps[cyclerState.currentStepIndex];
+  
+  console.log(`Cycler started on channel ${channel}, ${cycles || 'infinite'} cycles`);
+  console.log(`Found ${steps.length} total steps`);
+  console.log(`Starting at step index: ${cyclerState.currentStepIndex}`);
+  console.log(`Current step:`, cyclerState.currentStep);
+  console.log(`First step: ${cyclerState.currentStep ? cyclerState.currentStep.mode : 'UNDEFINED'}`);
+  
+  // Execute first step first to set up SMU mode
+  executeCurrentStep();
+  
+  // Then start data streaming after SMU is configured
+  setTimeout(() => {
+    start_streaming(channel);
+    console.log(`Started data streaming on channel ${channel}`);
+  }, 1000);
+}
+
+// Pause cycler
+function pauseCycler() {
+  if (!cyclerState.isRunning) {
+    throw new Error('Cycler is not running');
+  }
+  cyclerState.isPaused = true;
+  console.log('Cycler paused');
+}
+
+// Resume cycler
+function resumeCycler() {
+  if (!cyclerState.isRunning || !cyclerState.isPaused) {
+    throw new Error('Cycler is not paused');
+  }
+  cyclerState.isPaused = false;
+  console.log('Cycler resumed');
+}
+
+// Stop cycler
+function stopCycler() {
+  
+  // Stop data streaming
+  if (cyclerState.channel) {
+    try {
+      stop_streaming(cyclerState.channel);
+      console.log(`Stopped data streaming on channel ${cyclerState.channel}`);
+      disable_channel(cyclerState.channel);
+    } catch (error) {
+      console.error('Error stopping streaming/disabling channel during cycler stop:', error);
+    }
+  }
+  
+  // Close database connections
+  if (cyclerState.cyclerDataStmt) {
+    cyclerState.cyclerDataStmt.finalize();
+    cyclerState.cyclerDataStmt = null;
+  }
+  
+  if (cyclerState.cyclerDb) {
+    // Update metadata with end time and completion status
+    try {
+      cyclerState.cyclerDb.run('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)', 
+        'end_time', new Date().toISOString());
+      cyclerState.cyclerDb.run('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)', 
+        'test_status', 'completed');
+      cyclerState.cyclerDb.run('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)', 
+        'final_cycle_count', cyclerState.currentCycle.toString());
+      cyclerState.cyclerDb.run('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)', 
+        'total_test_time_s', cyclerState.startTime ? ((Date.now() - cyclerState.startTime) / 1000).toString() : '0');
+    } catch (error) {
+      console.error('Error updating final metadata:', error);
+    }
+    
+    cyclerState.cyclerDb.close();
+    cyclerState.cyclerDb = null;
+  }
+  
+  cyclerState.isRunning = false;
+  cyclerState.isPaused = false;
+  
+  console.log('Cycler stopped and database closed');
+  io.emit('cycler_status', { status: 'stopped' });
+}
+
+// Pause/Resume cycler
+function pauseCycler() {
+  cyclerState.isPaused = true;
+  console.log('Cycler paused');
+  io.emit('cycler_status', { status: 'paused' });
+}
+
+function resumeCycler() {
+  cyclerState.isPaused = false;
+  console.log('Cycler resumed');
+  io.emit('cycler_status', { status: 'running' });
+}
+
+// ============================================================================
+// BATTERY CYCLER REST API ENDPOINTS
+// ============================================================================
+
+// Start cycler
+app.post('/cycler/start', (req, res) => {
+  try {
+    const { channel, steps, cycles, enableLogging, metadata } = req.body;
+    
+    if (!channel || !steps) {
+      return res.status(400).json({ error: 'Channel and steps are required' });
+    }
+    
+    startCycler(channel, steps, cycles || 0, enableLogging !== false, metadata || {});
+    
+    res.json({
+      success: true,
+      message: 'Cycler started successfully',
+      channel: channel,
+      totalSteps: steps.length,
+      cycles: cycles || 'infinite'
+    });
+    
+  } catch (error) {
+    console.error('Error starting cycler:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Stop cycler
+app.post('/cycler/stop', (req, res) => {
+  try {
+    stopCycler();
+    res.json({ success: true, message: 'Cycler stopped' });
+  } catch (error) {
+    console.error('Error stopping cycler:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Pause cycler
+app.post('/cycler/pause', (req, res) => {
+  try {
+    if (!cyclerState.isRunning) {
+      return res.status(400).json({ error: 'Cycler is not running' });
+    }
+    pauseCycler();
+    res.json({ success: true, message: 'Cycler paused' });
+  } catch (error) {
+    console.error('Error pausing cycler:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Resume cycler
+app.post('/cycler/resume', (req, res) => {
+  try {
+    if (!cyclerState.isRunning || !cyclerState.isPaused) {
+      return res.status(400).json({ error: 'Cycler is not paused' });
+    }
+    resumeCycler();
+    res.json({ success: true, message: 'Cycler resumed' });
+  } catch (error) {
+    console.error('Error resuming cycler:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get cycler status
+app.get('/cycler/status', (req, res) => {
+  try {
+    const stepTime = cyclerState.stepStartTime ? 
+      (Date.now() - cyclerState.stepStartTime) / 1000 : 0;
+    const totalTime = cyclerState.startTime ? 
+      (Date.now() - cyclerState.startTime) / 1000 : 0;
+    
+    res.json({
+      isRunning: cyclerState.isRunning,
+      isPaused: cyclerState.isPaused,
+      channel: cyclerState.channel,
+      currentCycle: cyclerState.currentCycle,
+      totalCycles: cyclerState.totalCycles,
+      currentStepIndex: cyclerState.currentStepIndex,
+      currentStep: cyclerState.currentStep,
+      stepTime: stepTime,
+      totalTime: totalTime,
+      totalAh: cyclerState.totalAh,
+      stepAh: cyclerState.stepAh,
+      cycleAh: cyclerState.cycleAh,
+      logFile: cyclerState.cyclerLogFile,
+      totalSteps: cyclerState.steps.length
+    });
+  } catch (error) {
+    console.error('Error getting cycler status:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Validate step definition
+app.post('/cycler/validate', (req, res) => {
+  try {
+    const { steps } = req.body;
+    
+    if (!steps) {
+      return res.status(400).json({ error: 'Steps array is required' });
+    }
+    
+    validateCyclerSteps(steps);
+    
+    res.json({
+      success: true,
+      message: 'Step definition is valid',
+      totalSteps: steps.length
+    });
+    
+  } catch (error) {
+    console.error('Step validation error:', error);
+    res.status(400).json({ error: error.message });
+  }
+});
+
+console.log('Battery cycler functionality loaded successfully');
