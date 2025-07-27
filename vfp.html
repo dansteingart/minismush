@@ -1,0 +1,588 @@
+<!doctype html>
+<html>
+  <head>
+    <title>VFP</title>
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="/static/jquery.js"></script>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <link rel="stylesheet" type="text/css" href="/static/style.css">
+    <style>
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100vh;
+        display: flex;
+        flex-direction: column;
+      }
+      
+      #main-content {
+        flex: 1;
+        color:green;
+        font-family: "monaco";
+        padding: 20px;
+      }
+      
+      #console-container {
+        height: min(20vh, 200px);
+        border-top: 1px solid #ccc;
+      }
+      
+      #console-iframe {
+        width: 100%;
+        height: 100%;
+      }
+        button {
+            min-width: 100px;
+            width: auto;
+            margin: 2px;
+            padding: 5px 10px;
+        }
+        
+        .smu-grid {
+            display: grid;
+            grid-template-columns: 270px 200px 1fr;
+            grid-template-rows: repeat(2, auto);
+            gap: 20px;
+            margin: 20px 0;
+            width: 100%;
+        }
+        
+        .channel-display {
+            border: 1px solid #555;
+            padding: 15px;
+            border-radius: 5px;
+            background: rgba(0,50,0,0.2);
+            font-size: 20px;
+            color: lightgreen;
+            font-family: 'Monaco', monospace;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            min-height: 200px;
+        }
+        
+        .display-row {
+            margin: 5px 0;
+        }
+        
+        .plot-container {
+            border: 1px solid #555;
+            border-radius: 5px;
+            background: black;
+            height: 400px;
+            width: 100%;
+        }
+        
+        .channel-section {
+            border: 1px solid #555;
+            padding: 15px;
+            border-radius: 5px;
+            background: rgba(0,50,0,0.3);
+            max-width: 270px;
+        }
+        
+        .channel-title {
+            color: lightgreen;
+            font-weight: bold;
+            margin-bottom: 10px;
+            text-align: center;
+        }
+        
+        .control-group {
+            margin: 10px 0;
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+        
+        .control-group label {
+            color: lightgreen;
+            font-size: 12px;
+        }
+        
+        .control-group input {
+            width: 100%;
+        }
+        
+        .inline-control {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            margin: 5px 0;
+            height: 35px;
+        }
+        
+        .button-row {
+            height: 35px;
+        }
+        
+        .inline-control input {
+            flex: 1;
+            min-width: 80px;
+        }
+        
+        .inline-control input[type="number"][id*="-potential"],
+        .inline-control input[type="number"][id*="-current"],
+        .inline-control input[type="number"][id*="-sample-rate"] {
+            flex: 0.5;
+            min-width: 80px;
+        }
+        
+        .inline-control button {
+            min-width: 60px;
+        }
+        
+        .toggle-button {
+            background: rgb(100, 100, 100) !important;
+            color: #ccc !important;
+        }
+        
+        .toggle-button.active {
+            background: rgb(148, 186, 131) !important;
+            color: darkgreen !important;
+        }
+        
+        .streaming-button {
+            background: rgb(100, 100, 100) !important;
+            color: #ccc !important;
+        }
+        
+        .streaming-button.active {
+            background: orange !important;
+            color: white !important;
+        }
+        
+        .button-row {
+            display: flex;
+            gap: 5px;
+            flex-wrap: wrap;
+        }
+        
+        .button-row button {
+            flex: 1;
+            min-width: 80px;
+        }
+        
+        .button-row button.toggle-button {
+            flex: 1;
+            min-width: 60px;
+        }
+    </style>
+  </head>
+  <body>
+    <div id="main-content">
+      <h1>VFP</h1>
+      
+      <div class="smu-grid">
+        <!-- Row 1: Channel 1 -->
+        <!-- Channel 1 Controls -->
+        <div class="channel-section">
+          <div class="channel-title">Channel 1</div>
+          
+          <div class="button-row">
+            <button id="toggle-ch1" class="toggle-button" onclick="toggleChannel(1)">Enable</button>
+          </div>
+          
+          <div class="inline-control">
+            V: <input type="number" id="ch1-potential" step="0.01" placeholder="0.0">
+            <button onclick="setPotential(1)">Set</button>
+          </div>
+          
+          <div class="inline-control">
+            I: <input type="number" id="ch1-current" step="0.001" placeholder="0.0">
+            <button onclick="setCurrent(1)">Set</button>
+          </div>
+          
+          <div class="inline-control">
+            Hz: <input type="number" id="ch1-sample-rate" placeholder="1000">
+            <button onclick="setSampleRate(1)">Set</button>
+            <button id="stream-ch1" class="streaming-button" onclick="toggleStreaming(1)">Stream</button>
+          </div>
+        </div>
+        
+        <!-- Channel 1 Display -->
+        <div class="channel-display">
+          <div class="display-row">CH1</div>
+          <div class="display-row" id="ch1-voltage-disp">--.- V</div>
+          <div class="display-row" id="ch1-current-disp">--.- A</div>
+        </div>
+        
+        <!-- Channel 1 Plot -->
+        <div class="plot-container" id="ch1-plot"></div>
+        
+        <!-- Row 2: Channel 2 -->
+        <!-- Channel 2 Controls -->
+        <div class="channel-section">
+          <div class="channel-title">Channel 2</div>
+          
+          <div class="button-row">
+            <button id="toggle-ch2" class="toggle-button" onclick="toggleChannel(2)">Enable</button>
+          </div>
+          
+          <div class="inline-control">
+            V: <input type="number" id="ch2-potential" step="0.01" placeholder="0.0">
+            <button onclick="setPotential(2)">Set</button>
+          </div>
+          
+          <div class="inline-control">
+            I: <input type="number" id="ch2-current" step="0.001" placeholder="0.0">
+            <button onclick="setCurrent(2)">Set</button>
+          </div>
+          
+          <div class="inline-control">
+            Hz: <input type="number" id="ch2-sample-rate" placeholder="1000">
+            <button onclick="setSampleRate(2)">Set Hz</button>
+            <button id="stream-ch2" class="streaming-button" onclick="toggleStreaming(2)">Stream</button>
+          </div>
+        </div>
+        
+        <!-- Channel 2 Display -->
+        <div class="channel-display">
+          <div class="display-row">CH2</div>
+          <div class="display-row" id="ch2-voltage-disp">--.- V</div>
+          <div class="display-row" id="ch2-current-disp">--.- A</div>
+        </div>
+        
+        <!-- Channel 2 Plot -->
+        <div class="plot-container" id="ch2-plot"></div>
+      </div>
+    </div>
+    <div id="console-container">
+      <iframe id="console-iframe" src="/console"></iframe>
+    </div>
+
+    <script>
+      var socket = io();
+      
+      // SMU State Management - fetched from server
+      let smuState = {
+        channels: {
+          1: { potential: 0, current: 0, enabled: false, streaming: false, sampleRate: 1000, mode: null },
+          2: { potential: 0, current: 0, enabled: false, streaming: false, sampleRate: 1000, mode: null }
+        },
+        ledBrightness: 50
+      };
+      
+      function fetchState() {
+        return $.get('/smu/state').done(response => {
+          smuState = response;
+          updateAllDisplays();
+        }).fail(err => console.error('Error fetching state:', err));
+      }
+      
+      function updateButtonState(selector, isActive) {
+        const btn = $(selector);
+        if (isActive) {
+          btn.addClass('active');
+        } else {
+          btn.removeClass('active');
+        }
+      }
+      
+      function updateChannelDisplay(channel) {
+        const state = smuState.channels[channel];
+        $(`#ch${channel}-potential`).val(state.potential);
+        $(`#ch${channel}-current`).val(state.current);
+        $(`#ch${channel}-sample-rate`).val(state.sampleRate);
+        
+        updateButtonState(`#toggle-ch${channel}`, state.enabled);
+        $(`#toggle-ch${channel}`).text(state.enabled ? 'Disable' : 'Enable');
+        
+        updateButtonState(`#stream-ch${channel}`, state.streaming);
+        $(`#stream-ch${channel}`).text(state.streaming ? 'Stop' : 'Stream'); }
+      
+      function updateAllDisplays() {
+        updateChannelDisplay(1);
+        updateChannelDisplay(2);
+        $('#led-brightness').val(smuState.ledBrightness);
+      }
+      
+      // SMU API Functions using jQuery AJAX
+      function setMode(channel, mode) {
+        return new Promise((resolve, reject) => {
+          $.post('/smu/set_mode', {
+            channel: channel,
+            mode: mode
+          }).done(response => {
+            console.log(`Channel ${channel} mode set to ${mode}`);
+            fetchState().then(resolve);
+          }).fail(err => {
+            console.error('Error setting mode:', err);
+            reject(err);
+          });
+        });
+      }
+      
+      function setPotential(channel) {
+        const value = $(`#ch${channel}-potential`).val();
+        if (!value) return alert('Please enter a potential value');
+        
+        const potential = parseFloat(value);
+        
+        // Ensure we're in voltage control mode (FVMI) before setting potential
+        const currentMode = smuState.channels[channel].mode;
+        
+        if (currentMode !== 'FVMI') {
+          setMode(channel, 'FVMI').then(() => {
+            setPotentialDirect(channel, potential);
+          }).catch(err => console.error('Error setting mode:', err));
+        } else {
+          setPotentialDirect(channel, potential);
+        }
+      }
+      
+      function setPotentialDirect(channel, potential) {
+        $.post('/smu/set_potential', {
+          channel: channel,
+          potential: potential
+        }).done(response => {
+          console.log(`Channel ${channel} potential set to ${potential}V`);
+          fetchState();
+        }).fail(err => console.error('Error setting potential:', err));
+      }
+      
+      function setCurrent(channel) {
+        const value = $(`#ch${channel}-current`).val();
+        if (!value) return alert('Please enter a current value');
+        
+        const current = parseFloat(value);
+        
+        // Ensure we're in current control mode (FIMV) before setting current
+        const currentMode = smuState.channels[channel].mode;
+        
+        if (currentMode !== 'FIMV') {
+          setMode(channel, 'FIMV').then(() => {
+            setCurrentDirect(channel, current);
+          }).catch(err => console.error('Error setting mode:', err));
+        } else {
+          setCurrentDirect(channel, current);
+        }
+      }
+      
+      function setCurrentDirect(channel, current) {
+        $.post('/smu/set_current', {
+          channel: channel,
+          current: current
+        }).done(response => {
+          console.log(`Channel ${channel} current set to ${current}A`);
+          fetchState();
+        }).fail(err => console.error('Error setting current:', err));
+      }
+      
+      function toggleChannel(channel) {
+        const state = smuState.channels[channel];
+        const newState = !state.enabled;
+        
+        const endpoint = newState ? '/smu/enable_channel' : '/smu/disable_channel';
+        $.post(endpoint, { channel: channel })
+          .done(response => {
+            console.log(`Channel ${channel} ${newState ? 'enabled' : 'disabled'}`);
+            fetchState();
+          }).fail(err => console.error('Error toggling channel:', err));
+      }
+      
+      function measureVoltage(channel) {
+        $.post('/smu/measure_voltage', { channel: channel })
+          .done(response => console.log(`Channel ${channel} voltage measured`))
+          .fail(err => console.error('Error measuring voltage:', err));
+      }
+      
+      function measureCurrent(channel) {
+        $.post('/smu/measure_current', { channel: channel })
+          .done(response => console.log(`Channel ${channel} current measured`))
+          .fail(err => console.error('Error measuring current:', err));
+      }
+      
+      function getIdentity() {
+        $.get('/smu/get_identity')
+          .done(response => console.log('Identity:', response))
+          .fail(err => console.error('Error getting identity:', err));
+      }
+      
+      function reset() {
+        $.post('/smu/reset')
+          .done(response => console.log('SMU reset'))
+          .fail(err => console.error('Error resetting SMU:', err));
+      }
+      
+      function getTemperatures() {
+        $.get('/smu/get_temperatures')
+          .done(response => console.log('Temperatures:', response))
+          .fail(err => console.error('Error getting temperatures:', err));
+      }
+      
+      function setLedBrightness() {
+        const value = $('#led-brightness').val();
+        if (!value) return alert('Please enter LED brightness (0-100)');
+        
+        $.post('/smu/set_led_brightness', {
+          brightness: parseInt(value)
+        }).done(response => console.log('LED brightness set'))
+          .fail(err => console.error('Error setting LED brightness:', err));
+      }
+      
+      function setSampleRate(channel) {
+        const value = $(`#ch${channel}-sample-rate`).val();
+        if (!value) return alert('Please enter sample rate');
+        
+        const rate = parseInt(value);
+        $.post('/smu/set_sample_rate', {
+          channel: channel,
+          rate: rate
+        }).done(response => {
+          console.log(`Channel ${channel} sample rate set to ${rate}Hz`);
+          fetchState();
+        }).fail(err => console.error('Error setting sample rate:', err));
+      }
+      
+      function toggleStreaming(channel) {
+        const state = smuState.channels[channel];
+        const newState = !state.streaming;
+        
+        const endpoint = newState ? '/smu/start_streaming' : '/smu/stop_streaming';
+        $.post(endpoint, { channel: channel })
+          .done(response => {
+            console.log(`Channel ${channel} streaming ${newState ? 'started' : 'stopped'}`);
+            fetchState();
+          }).fail(err => console.error('Error toggling streaming:', err));
+      }
+      
+      function initButtons() {
+        $('button[id]').each(function() {
+          var buttonId = $(this).attr('id');
+          $(this).text(buttonId);
+          $(this).click(function() { socket.emit('input', buttonId);});
+        });
+      }
+      
+      // Plot data storage
+      const maxPoints = 1000;
+      const plotData = {
+        ch1: {
+          time: [],
+          voltage: [],
+          current: []
+        },
+        ch2: {
+          time: [],
+          voltage: [],
+          current: []
+        }
+      };
+      
+      // Initialize plots
+      function initPlots() {
+        const plotConfig = {
+          displayModeBar: false,
+          responsive: true
+        };
+        
+        const plotLayout = {
+          paper_bgcolor: 'black',
+          plot_bgcolor: 'black',
+          font: { family: 'Monaco', color: 'lightgreen' },
+          margin: { l: 50, r: 20, t: 30, b: 40 },
+          xaxis: {
+            gridcolor: 'darkgreen',
+            color: 'lightgreen',
+            showgrid: true,
+            type: 'date'
+          },
+          yaxis: {
+            gridcolor: 'darkgreen',
+            color: 'lightgreen',
+            showgrid: true
+          },
+          showlegend: false
+        };
+        
+        // Channel 1 plots
+        const ch1VoltageTrace = {
+          x: [], y: [], 
+          type: 'scatter', 
+          mode: 'lines',
+          line: { color: 'lightgreen' },
+          name: 'Voltage'
+        };
+        
+        const ch1CurrentTrace = {
+          x: [], y: [], 
+          type: 'scatter', 
+          mode: 'lines',
+          line: { color: 'lightgreen' },
+          name: 'Current',
+          xaxis: 'x2',
+          yaxis: 'y2'
+        };
+        
+        const ch1Layout = {
+          ...plotLayout,
+          title: { text: 'Channel 1', font: { color: 'lightgreen' } },
+          grid: { rows: 2, columns: 1, pattern: 'independent' },
+          xaxis: { ...plotLayout.xaxis, showticklabels: false, domain: [0, 1] },
+          yaxis: { ...plotLayout.yaxis, title: 'Voltage (V)', domain: [0.55, 1] },
+          xaxis2: { ...plotLayout.xaxis, title: 'Time', domain: [0, 1] },
+          yaxis2: { ...plotLayout.yaxis, title: 'Current (A)', domain: [0, 0.45] }
+        };
+        
+        // Channel 2 plots  
+        const ch2Layout = {
+          ...plotLayout,
+          title: { text: 'Channel 2', font: { color: 'lightgreen' } },
+          grid: { rows: 2, columns: 1, pattern: 'independent' },
+          xaxis: { ...plotLayout.xaxis, showticklabels: false, domain: [0, 1] },
+          yaxis: { ...plotLayout.yaxis, title: 'Voltage (V)', domain: [0.55, 1] },
+          xaxis2: { ...plotLayout.xaxis, title: 'Time', domain: [0, 1] },
+          yaxis2: { ...plotLayout.yaxis, title: 'Current (A)', domain: [0, 0.45] }
+        };
+        
+        Plotly.newPlot('ch1-plot', [ch1VoltageTrace, ch1CurrentTrace], ch1Layout, plotConfig);
+        Plotly.newPlot('ch2-plot', [ch1VoltageTrace, ch1CurrentTrace], ch2Layout, plotConfig);
+      }
+      
+      function updatePlot(channel, data) {
+        const ch = plotData[`ch${channel}`];
+        
+        // Convert timestamp to Date object for proper time formatting
+        const timestamp = new Date(data.time_ms);
+        
+        // Add new data
+        ch.time.push(timestamp);
+        ch.voltage.push(data.voltage_V);
+        ch.current.push(data.current_A);
+        
+        // Maintain buffer size
+        if (ch.time.length > maxPoints) {
+          ch.time.shift();
+          ch.voltage.shift();
+          ch.current.shift();
+        }
+        
+        // Update plot
+        Plotly.restyle(`ch${channel}-plot`, {
+          x: [ch.time, ch.time],
+          y: [ch.voltage, ch.current]
+        });
+      }
+      
+      // Socket listeners for real-time data
+      socket.on('ch1', function(data) {
+        $('#ch1-voltage-disp').text(data.voltage_V + ' V');
+        $('#ch1-current-disp').text(parseFloat(data.current_A) + ' A');
+        updatePlot(1, data);
+      });
+      
+      socket.on('ch2', function(data) {
+        $('#ch2-voltage-disp').text(data.voltage_V + ' V');
+        $('#ch2-current-disp').text(parseFloat(data.current_A) + ' A');
+        updatePlot(2, data);
+      });
+      
+      // Initialize display on page load
+      $(document).ready(function() {
+        fetchState();
+        initPlots();
+      });
+    </script>
+  </body>
+</html>

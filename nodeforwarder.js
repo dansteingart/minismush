@@ -87,6 +87,19 @@ function msleep(n) {
 	  }
   }
   
+  function parseSMUStream(s)
+  {
+    p = s.split(",");
+    out = {}
+    out['channel']   = parseInt(p[0])
+    //out['time_ms']   = parseInt(p[1])
+    out['time_ms']   = Date.now()
+    out['voltage_V'] = parseFloat(p[2])
+    out['current_A'] = -parseFloat(p[3].replace("e-0","e-"))
+    return out
+
+  }
+
   function createNewPort(path,baud) {
 	  console.log(`Initializing serial port with path: ${path}`);
 	  serialPort = new SerialPort(path, { baudRate: baud });
@@ -113,11 +126,24 @@ function msleep(n) {
 			}
 		}
 		
+    //Parsing last line
+    const lines = buf.split('\n');
+    const lastLine = lines[lines.length - 2].trim();
+    console.log(lastLine)
+    if (lastLine.search("1,") == 0)      {ch1.push(parseSMUStream(lastLine)); io.emit('ch1',parseSMUStream(lastLine));}
+    else if (lastLine.search("2,") == 0) {ch2.push(parseSMUStream(lastLine)); io.emit('ch2',parseSMUStream(lastLine))}
+    else                                 {otm.push(lastLine);                io.emit('otm',lastLine)}
+
+    //FIFO on blen
+    if (ch1.length > blen) ch1.shift();
+    if (ch2.length > blen) ch2.shift();
+    if (otm.length > blen) otm.shift();
+
+
 		// Handle cycler data processing if cycler is running
 		if (cyclerState.isRunning && !cyclerState.isPaused) {
 			const dataString = data.toString('utf8').trim();
-			if (dataString) {
-				parseCyclerStreamingData(dataString);
+			if (dataString) { parseCyclerStreamingData(dataString);
 			}
 		}
 		
@@ -146,6 +172,9 @@ if (sp != undefined) initializeSerialPort(sp,baud)
 
 //On Data fill a circular buf of the specified length
 buf = ""
+ch1 = []
+ch2 = []
+otm = []
 
 // Logging state management
 let loggingState = {
@@ -351,15 +380,13 @@ app.get('/read/', function(req, res){
 });
 
 
-//weak interface
-app.get('/', function(req, res){
-    res.sendFile(__dirname + '/console.html');
-});
+//default interface
+app.get('/', function(req, res){ res.sendFile(__dirname + '/console.html'); });
+app.get('/console', function(req, res){ res.sendFile(__dirname + '/console.html'); });
 
+//virtual front panel
+app.get('/vfp', function(req, res){ res.sendFile(__dirname + '/vfp.html'); });
 
-app.get('/console', function(req, res){
-    res.sendFile(__dirname + '/console.html');
-});
 
 // Start CSV logging
 app.post('/start_csv_log', function(req, res) {
@@ -631,6 +658,31 @@ function writeout(s,le="\r\n")
 }
 
 
+// SMU State Management
+const smuState = {
+  channels: {
+    1: {
+      potential: 0,
+      current: 0,
+      enabled: false,
+      streaming: false,
+      sampleRate: 1000,
+      mode: null // 'FVMI' for voltage control, 'FIMV' for current control
+    },
+    2: {
+      potential: 0,
+      current: 0,
+      enabled: false,
+      streaming: false,
+      sampleRate: 1000,
+      mode: null
+    }
+  },
+  ledBrightness: 50,
+  identity: null,
+  temperatures: null
+};
+
 smu_mode = undefined;
 function response(res) { 
   setTimeout(()=>{
@@ -647,38 +699,74 @@ app.get('/smu/get_identity', (req,res)=>
      response(res);
   });
 
-function set_mode(ch,mode) {writeout(`SOUR${ch}:${mode} ENA`)}
+function set_mode(ch,mode) {
+  writeout(`SOUR${ch}:${mode} ENA`);
+  smuState.channels[ch].mode = mode;
+}
 
 function set_current(ch,cur)
 {
-  if (smu_mode !=  "FIMV") set_mode(ch,'FIMV');
-  writeout(`SOUR${ch}:CURR ${cur}`)
+  if (smuState.channels[ch].mode !=  "FIMV") set_mode(ch,'FIMV');
+  writeout(`SOUR${ch}:CURR ${cur}`);
+  smuState.channels[ch].current = cur;
 }
 
 function set_potential(ch,pot)
 {
-  if (smu_mode !=  "FVMI") set_mode(ch,'FVMI');
-  writeout(`SOUR${ch}:VOLT ${pot}`)
+  if (smuState.channels[ch].mode !=  "FVMI") set_mode(ch,'FVMI');
+  writeout(`SOUR${ch}:VOLT ${pot}`);
+  smuState.channels[ch].potential = pot;
 }
 
 // Measurement Functions
-function measure_voltage(ch) { write(`MEAS${ch}:VOLT?`) }
+function measure_voltage(ch) { writeout(`MEAS${ch}:VOLT?`) }
 function measure_current(ch) { writeout(`MEAS${ch}:CURR?`) }
 function measure_voltage_and_current(ch) { writeout(`MEAS${ch}:VOLT:CURR?`) }
 
 // Channel Control Functions
-function enable_channel(ch) { writeout(`OUTP${ch} ON`); }
-function disable_channel(ch) { writeout(`OUTP${ch} OFF`) }
+function enable_channel(ch) { 
+  writeout(`OUTP${ch} ON`); 
+  smuState.channels[ch].enabled = true;
+}
+function disable_channel(ch) { 
+  writeout(`OUTP${ch} OFF`);
+  smuState.channels[ch].enabled = false;
+}
 function set_voltage_range(ch, range) { writeout(`SOUR${ch}:VOLT:RANGE ${range}`) }
-function reset_device() { writeout("*RST") }
+function reset_device() { 
+  writeout("*RST");
+  // Reset state
+  Object.keys(smuState.channels).forEach(ch => {
+    smuState.channels[ch] = {
+      potential: 0,
+      current: 0,
+      enabled: false,
+      streaming: false,
+      sampleRate: 1000,
+      mode: null
+    };
+  });
+}
 
 // Data Streaming Functions
-function start_streaming(ch) { writeout(`SOUR${ch}:DATA:STREAM ON`) }
-function stop_streaming(ch) { writeout(`SOUR${ch}:DATA:STREAM OFF`) }
-function set_sample_rate(ch, rate) { writeout(`SOUR${ch}:DATA:SRATE ${rate}`) }
+function start_streaming(ch) { 
+  writeout(`SOUR${ch}:DATA:STREAM ON`);
+  smuState.channels[ch].streaming = true;
+}
+function stop_streaming(ch) { 
+  writeout(`SOUR${ch}:DATA:STREAM OFF`);
+  smuState.channels[ch].streaming = false;
+}
+function set_sample_rate(ch, rate) { 
+  writeout(`SOUR${ch}:DATA:SRATE ${rate}`);
+  smuState.channels[ch].sampleRate = rate;
+}
 
 // System Functions
-function set_led_brightness(brightness) { writeout(`SYST:LED ${brightness}`) }
+function set_led_brightness(brightness) { 
+  writeout(`SYST:LED ${brightness}`);
+  smuState.ledBrightness = brightness;
+}
 function get_led_brightness() { writeout("SYST:LED?") }
 function get_temperatures() { writeout("SYST:TEMP?") }
 function set_time(timestamp) { writeout(`SYST:TIME ${timestamp}`) }
@@ -722,6 +810,26 @@ app.post("/smu/set_current",(req,res) => {
   } catch (error) {
     console.error('Error setting current:', error);
     res.status(500).json({ error: 'Failed to set current' });
+  }
+})
+
+app.post("/smu/set_mode",(req,res) => {
+  try {
+    const { channel, mode } = req.body;
+    
+    if (channel === undefined || mode === undefined) {
+      return res.status(400).json({ error: 'Channel and mode are required' });
+    }
+    
+    if (mode !== 'FVMI' && mode !== 'FIMV') {
+      return res.status(400).json({ error: 'Mode must be FVMI or FIMV' });
+    }
+    
+    set_mode(channel, mode);
+    response(res);
+  } catch (error) {
+    console.error('Error setting mode:', error);
+    res.status(500).json({ error: 'Failed to set mode' });
   }
 })
 
@@ -971,6 +1079,16 @@ app.post("/smu/disable_wifi", (req,res) => {
   } catch (error) {
     console.error('Error disabling WiFi:', error);
     res.status(500).json({ error: 'Failed to disable WiFi' });
+  }
+})
+
+// SMU State Management Endpoints
+app.get("/smu/state", (req,res) => {
+  try {
+    res.json(smuState);
+  } catch (error) {
+    console.error('Error getting SMU state:', error);
+    res.status(500).json({ error: 'Failed to get SMU state' });
   }
 })
 

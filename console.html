@@ -2,45 +2,7 @@
 <html>
   <head>
     <title>now, listen!</title>
-    <style>
-      * { margin: 10; padding: 10; box-sizing: border-box; }
-      body { font: 13px Helvetica, Arial; background-color: black; }
-      form { background: #000; padding: 3px; position: fixed; top: 0; width: 90%; }
-      form input { border: 0; padding: 0px; width: 90%; margin-right: .5%;  }
-      form button { width: 9%; background: rgb(148, 186, 131); border: none; padding: 5px; height:30px; color:darkgreen;outline:none}
-	    .messages{
-        margin-top:50px;
-        font-family: 'Monaco';
-        white-space: pre-line; 
-        background-color: black;
-        color: green;
-      }
-      input {height: 30px; background-color: darkgreen; color: lightgreen;outline: none; margin: 10; }
-      #growing-div {
-            position: fixed;
-            top: 200;
-            left: 0;
-            height: 200px;
-            width: 0; /* Start with 0 width */
-            max-width: 300px; /* Ensure it doesn’t grow beyond 200px */
-            background-color: rgba(0,0,0,.7);
-            color: green;
-            box-shadow: 3px 0 5px darkgreen;
-            overflow: hidden;
-        }
-        .serialbox{padding:5px 10px 5px 10px;}
-
-        #sliding-div.active {
-            right: 0; /* Slide into view */
-        }
-        input {height: 30px; background-color: darkgreen; color: lightgreen; border: 0; outline: none; margin: 10; }
-        button { width: 50%; background: rgb(148, 186, 131); border: none; padding: 5px; height:30px; color:darkgreen}
-        form button:hover, button:hover {color:lightgreen;background: darkgreen;}
-        form button:active, button:active {color:lightgreen;background: green;}
-
-        select {height: 30px; background-color: darkgreen; color: lightgreen; border: 0; outline: none; margin: 10; padding:0;}
-
-    </style>
+    <link rel="stylesheet" type="text/css" href="/static/style.css">
   </head>
   <body>
     <div id="growing-div">
