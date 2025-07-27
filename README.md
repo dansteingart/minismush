@@ -1,8 +1,8 @@
 # minismush
 
-**A Node.js-based serial communication and data logging platform for electrochemistry applications using Source Measure Units (SMUs).**
+**A Node.js-based serial communication and data logging platform for electrochemistry applications using the miniSMU S01.**
 
-*Forked from and rooted in the excellent [nodeforwarder](https://github.com/original/nodeforwarder) project, extended with SMU-specific functionality and comprehensive data logging capabilities.*
+*Forked from the [nodeforwarder](https://github.com/original/nodeforwarder) to be used with the fantastic Undalogic [miniSMU MS01](https://www.undalogic.com/minismu), 
 
 ## Overview
 
@@ -190,23 +190,4 @@ socket.on('data', (data) => {
 });
 ```
 
-## Credits
 
-This project is forked from and builds upon the excellent [nodeforwarder](https://github.com/original/nodeforwarder) project, which provides the core serial-to-HTTP bridge functionality. We've extended it with comprehensive SMU control, data logging, and electrochemistry-specific features.
-
-**Original nodeforwarder features:**
-- Serial port to RESTful interface conversion
-- WebSocket support for real-time communication
-- Cross-platform serial port handling
-- Basic web interface for terminal operations
-
-**minismush extensions:**
-- Complete SCPI command implementation for SMU devices
-- Advanced data logging with CSV/SQLite support
-- Real-time data streaming and visualization
-- System management and WiFi configuration
-- Auto-schema detection and data parsing
-
-## License
-
-Inherits license from original nodeforwarder project.
