@@ -72,3 +72,4 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.temp
+examples/__pycache__/minismush_client.cpython-311.pyc
