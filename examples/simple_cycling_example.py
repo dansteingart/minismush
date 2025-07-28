@@ -108,8 +108,13 @@ def main():
     
     if result and result.get('success'):
         print("✓ Test started successfully!")
+        print(f"  • Data will be logged to: /data/battery/")
+        print(f"  • Using enhanced array-based analysis")
         print("\nMonitor with:")
         print("  curl http://localhost:3000/cycler/status")
+        print("  curl http://localhost:3000/cycler/step_analysis    # Array-based analysis")
+        print("  curl http://localhost:3000/cycler/performance_metrics")
+        print("  curl 'http://localhost:3000/data/ch1?limit=10'    # Access data arrays")
         print("\nStop with:")
         print("  curl -X POST http://localhost:3000/cycler/stop")
     else:

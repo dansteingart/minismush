@@ -1,6 +1,6 @@
 # Battery Cycling Examples
 
-This directory contains Python examples demonstrating how to use the minismush battery cycler functionality.
+This directory contains Python examples demonstrating the minismush battery cycler functionality with enhanced array-based processing and automatic data organization.
 
 ## Prerequisites
 
@@ -88,6 +88,7 @@ python battery_cycling_example.py
 - Creates a simple 3-cycle test at 10 mA
 - Shows minimal test configuration
 - Server handles all execution
+- Demonstrates new array-based monitoring
 
 **Usage:**
 ```bash
@@ -98,6 +99,30 @@ python simple_cycling_example.py
 - Sets up basic test parameters
 - Validates and starts test
 - Node server manages the complete cycling process
+- Shows new enhanced monitoring endpoints
+
+### 3. array_based_cycling.py ⭐ NEW
+
+**Enhanced array-based cycling demonstration** - showcases new analysis features.
+
+**Features:**
+- Demonstrates array-based data processing
+- Real-time step analysis using accumulated data
+- Enhanced cutoff logic with trend analysis
+- Direct access to ch1/ch2 data arrays
+- Performance metrics with energy calculations
+
+**Usage:**
+```bash
+python array_based_cycling.py
+```
+
+**What it showcases:**
+- Voltage trend analysis for better step endings
+- Current stability assessment
+- Array-based performance metrics
+- Direct data array access via REST API
+- Enhanced monitoring with multiple analysis endpoints
 
 ## Battery Cycle Definition
 
@@ -130,6 +155,7 @@ Both examples use a standard 4-step battery cycle:
 
 ## API Endpoints Used
 
+### Core Cycling Endpoints
 - `POST /cycler/validate` - Validate step definitions
 - `POST /cycler/start` - Start cycling with step definition
 - `GET /cycler/status` - Monitor progress and metrics
@@ -137,13 +163,30 @@ Both examples use a standard 4-step battery cycle:
 - `POST /cycler/pause` - Pause cycling
 - `POST /cycler/resume` - Resume paused cycling
 
+### Enhanced Array-Based Endpoints ⭐ NEW
+- `GET /cycler/step_analysis` - Real-time step analysis with array data
+- `GET /cycler/performance_metrics` - Performance metrics with energy calculations
+- `POST /cycler/process_arrays` - Force manual array processing
+- `GET /data/ch1?limit=100` - Access ch1 data array
+- `GET /data/ch2?limit=100` - Access ch2 data array
+- `GET /data/analysis?channel=1` - Comprehensive data analysis
+
 ## Data Logging
 
-When cycling starts with `enableLogging: true`, the system automatically creates **both SQLite and CSV files**:
+When cycling starts with `enableLogging: true`, the system automatically creates **both SQLite and CSV files** in organized directories:
+
+### Automatic Directory Structure ⭐ NEW
+```
+/data/
+├── battery/                          # Battery cycling logs
+│   ├── battery_test_TIMESTAMP.db     # SQLite database  
+│   └── battery_test_TIMESTAMP.csv    # CSV export
+└── other_data.csv                    # General data logs
+```
 
 ### SQLite Database (Primary Format)
 ```
-battery_test_2024-01-15T10-30-45-123Z.db
+/data/battery/battery_test_2024-01-15T10-30-45-123Z.db
 ```
 
 **Schema:**

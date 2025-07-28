@@ -115,10 +115,14 @@ def start_battery_test():
         print("✓ 20-cycle battery test started successfully!")
         print(f"  - Channel: {result.get('channel')}")
         print(f"  - Total cycles: {result.get('cycles')}")
-        print(f"  - Log file will be created automatically")
+        print(f"  - Log files automatically saved to: /data/battery/")
+        print(f"  - Using enhanced array-based cycling analysis")
         print()
         print("The test is now running on the server.")
-        print("Monitor progress with: curl http://localhost:3000/cycler/status")
+        print("Monitor progress with:")
+        print("  curl http://localhost:3000/cycler/status")
+        print("  curl http://localhost:3000/cycler/step_analysis")
+        print("  curl http://localhost:3000/cycler/performance_metrics")
         print("Stop test with: curl -X POST http://localhost:3000/cycler/stop")
         return True
     else:

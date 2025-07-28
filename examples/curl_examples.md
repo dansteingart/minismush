@@ -248,12 +248,12 @@ curl -X POST "$BASE_URL/smu/disable_wifi"
 
 ### Manual Data Logging (Non-Cycler)
 ```bash
-# Start CSV logging
+# Start CSV logging (automatically saved to /data/)
 curl -X POST "$BASE_URL/start_csv_log" \
   -H "Content-Type: application/json" \
   -d '{"filename": "manual_test.csv", "columns": ["timestamp", "voltage", "current", "notes"]}'
 
-# Start SQLite logging
+# Start SQLite logging (automatically saved to /data/)
 curl -X POST "$BASE_URL/start_sqlite_log" \
   -H "Content-Type: application/json" \
   -d '{"filename": "manual_test.db", "table": "measurements", "columns": ["timestamp", "voltage", "current"]}'
@@ -265,9 +265,43 @@ curl -X GET "$BASE_URL/log_status"
 curl -X POST "$BASE_URL/stop_log"
 ```
 
+### Array-Based Data Access
+```bash
+# Access ch1 data array (last 100 points)
+curl -X GET "$BASE_URL/data/ch1?limit=100"
+
+# Access ch2 data array (last 50 points, skip 10)
+curl -X GET "$BASE_URL/data/ch2?limit=50&offset=10"
+
+# Get comprehensive data analysis for channel 1
+curl -X GET "$BASE_URL/data/analysis?channel=1"
+
+# Get comprehensive data analysis for channel 2
+curl -X GET "$BASE_URL/data/analysis?channel=2"
+```
+
+### Enhanced Cycling Monitoring
+```bash
+# Get array-based step analysis (enhanced)
+curl -X GET "$BASE_URL/cycler/step_analysis"
+
+# Get performance metrics with energy calculations
+curl -X GET "$BASE_URL/cycler/performance_metrics"
+
+# Force manual array processing (for testing/debugging)
+curl -X POST "$BASE_URL/cycler/process_arrays"
+
+# Standard cycler status
+curl -X GET "$BASE_URL/cycler/status"
+```
+
 ## Real-World Test Scenarios
 
-**Note**: All battery cycling tests automatically manage channel states. No manual channel enabling is required.
+**Notes**: 
+- All battery cycling tests automatically manage channel states. No manual channel enabling is required.
+- Battery cycling logs are automatically saved to `/data/battery/` directory
+- General data logs are automatically saved to `/data/` directory
+- All tests now use enhanced array-based analysis for better performance
 
 ### 1. Quick Battery Health Check
 ```bash

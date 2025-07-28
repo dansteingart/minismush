@@ -14,9 +14,10 @@ cycler = BatteryCycler("http://localhost:3000")
 # Create simple cycle: charge to 4.2V, discharge to 3.0V
 steps = [
     {"cycle": "start"},
-    {"mode": "cc", "current": 0.010, "cutoff_V": 4.2, "cutoff_time_s": 3600},  # 10mA charge
-    {"mode": "cv", "voltage": 4.2, "cutoff_A": 0.001, "cutoff_time_s": 1800},  # CV hold
-    {"mode": "cc", "current": -0.010, "cutoff_V": 3.0, "cutoff_time_s": 3600}, # 10mA discharge
+    {"mode": "ocv", "current": 0, "cutoff_V": 3.75, "cutoff_time_s": 10},  # 10mA charge
+    {"mode": "cc", "current": 0.0001, "cutoff_V": 3.75, "cutoff_time_s": 3600},  # 10mA charge
+    {"mode": "cv", "voltage": 3.75, "cutoff_A": 0.001, "cutoff_time_s": 10},  # CV hold
+    {"mode": "cc", "current": -0.0001, "cutoff_V": 3.0, "cutoff_time_s": 3600}, # 10mA discharge
     {"cycle": "end"}
 ]
 

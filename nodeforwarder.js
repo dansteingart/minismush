@@ -118,34 +118,59 @@ function msleep(n) {
 		if (buf.length > blen) buf = buf.substr(buf.length-blen,buf.length) 
 		io.emit('data', data.toString('utf8'));
 		
-		// Handle logging if active
-		if (loggingState.isLogging) {
-			const dataString = data.toString('utf8').trim();
-			if (dataString) {
-				handleDataLogging(dataString);
-			}
-		}
+		// Handle logging if active (disabled - now using structured ch1/ch2 logging)
+		// if (loggingState.isLogging) {
+		// 	const dataString = data.toString('utf8').trim();
+		// 	if (dataString) {
+		// 		handleDataLogging(dataString);
+		// 	}
+		// }
 		
     //Parsing last line
     const lines = buf.split('\n');
     const lastLine = lines[lines.length - 2].trim();
-    console.log(lastLine)
-    if (lastLine.search("1,") == 0)      {ch1.push(parseSMUStream(lastLine)); io.emit('ch1',parseSMUStream(lastLine));}
-    else if (lastLine.search("2,") == 0) {ch2.push(parseSMUStream(lastLine)); io.emit('ch2',parseSMUStream(lastLine))}
-    else                                 {otm.push(lastLine);                io.emit('otm',lastLine)}
+    //console.log(lastLine)
+    
+    let updatedChannel = null;
+    if (lastLine.search("1,") == 0) {
+      const parsedData = parseSMUStream(lastLine);
+      ch1.push(parsedData); 
+      io.emit('ch1', parsedData);
+      updatedChannel = 1;
+      
+      // Log ch1 data if logging is active
+      if (loggingState.isLogging) {
+        handleChannelDataLogging(1, parsedData);
+      }
+    }
+    else if (lastLine.search("2,") == 0) {
+      const parsedData = parseSMUStream(lastLine);
+      ch2.push(parsedData); 
+      io.emit('ch2', parsedData);
+      updatedChannel = 2;
+      
+      // Log ch2 data if logging is active
+      if (loggingState.isLogging) {
+        handleChannelDataLogging(2, parsedData);
+      }
+    }
+    else {
+      otm.push(lastLine);                
+      io.emit('otm',lastLine);
+    }
 
     //FIFO on blen
     if (ch1.length > blen) ch1.shift();
     if (ch2.length > blen) ch2.shift();
     if (otm.length > blen) otm.shift();
 
-
-		// Handle cycler data processing if cycler is running
-		if (cyclerState.isRunning && !cyclerState.isPaused) {
-			const dataString = data.toString('utf8').trim();
-			if (dataString) { parseCyclerStreamingData(dataString);
-			}
-		}
+    // Array-based cycler processing - triggered when ch1 or ch2 gets new data
+    if (cyclerState.isRunning && !cyclerState.isPaused && updatedChannel) {
+      // Only process if this is the channel we're cycling on
+      if (updatedChannel === cyclerState.channel) {
+        processArrayBasedCycling(updatedChannel);
+      }
+    }
 		
 		});
   
@@ -186,7 +211,10 @@ let loggingState = {
   schemaDetected: false,
   csvWriter: null,
   db: null,
-  insertStmt: null
+  insertStmt: null,
+  // Command logging
+  cmdLogWriter: null,
+  cmdLogFile: null
 };
 
 // Helper function to detect schema from first data row
@@ -237,6 +265,99 @@ function parseDataToObject(dataString, columns) {
 }
 
 // Handle data logging to CSV or SQLite
+// New function to handle ch1/ch2 structured data logging
+function handleChannelDataLogging(channel, parsedData) {
+  try {
+    // Get current SMU settings for this channel
+    const channelState = smuState.channels[channel] || {};
+    
+    // Get cycling state if active for this channel
+    const isCycling = cyclerState.isRunning && cyclerState.channel === channel;
+    
+    // Create structured log entry with channel info and settings
+    const unixTime = Math.floor(parsedData.time_ms / 1000);
+    const logEntry = {
+      unixtime: unixTime,
+      timestamp: new Date(parsedData.time_ms).toISOString(),
+      channel: channel,
+      voltage_V: parsedData.voltage_V,
+      current_A: parsedData.current_A,
+      time_ms: parsedData.time_ms,
+      // SMU settings
+      mode: channelState.mode || 'unknown',
+      set_potential: channelState.potential || 0,
+      set_current: channelState.current || 0,
+      enabled: channelState.enabled || false,
+      streaming: channelState.streaming || false,
+      sample_rate: channelState.sampleRate || 0,
+      // Cycling state (if active)
+      cycling: isCycling,
+      cycle_num: isCycling ? cyclerState.currentCycle : null,
+      step_num: isCycling ? cyclerState.currentStepIndex : null,
+      step_type: isCycling ? (cyclerState.currentStep?.mode || null) : null
+    };
+    
+    // Force structured schema for channel data (override auto-detection)
+    if (!loggingState.schemaDetected) {
+      // Override any existing columns with structured format including SMU settings and cycling state
+      loggingState.columns = [
+        'unixtime', 'timestamp', 'channel', 'voltage_V', 'current_A', 'time_ms',
+        'mode', 'set_potential', 'set_current', 'enabled', 'streaming', 'sample_rate',
+        'cycling', 'cycle_num', 'step_num', 'step_type'
+      ];
+      
+      if (loggingState.type === 'csv') {
+        // Create CSV writer with proper headers
+        const csvHeaders = [
+          { id: 'unixtime', title: 'unixtime' },
+          { id: 'timestamp', title: 'timestamp' },
+          { id: 'channel', title: 'channel' },
+          { id: 'voltage_V', title: 'voltage_V' },
+          { id: 'current_A', title: 'current_A' },
+          { id: 'time_ms', title: 'time_ms' },
+          { id: 'mode', title: 'mode' },
+          { id: 'set_potential', title: 'set_potential' },
+          { id: 'set_current', title: 'set_current' },
+          { id: 'enabled', title: 'enabled' },
+          { id: 'streaming', title: 'streaming' },
+          { id: 'sample_rate', title: 'sample_rate' },
+          { id: 'cycling', title: 'cycling' },
+          { id: 'cycle_num', title: 'cycle_num' },
+          { id: 'step_num', title: 'step_num' },
+          { id: 'step_type', title: 'step_type' }
+        ];
+        
+        loggingState.csvWriter = createCsvWriter({
+          path: loggingState.filename,
+          header: csvHeaders,
+          append: false
+        });
+      } else if (loggingState.type === 'sqlite') {
+        initializeSqliteLogging();
+      }
+      
+      loggingState.schemaDetected = true;
+      console.log('📊 Channel data logging initialized with structured schema:', loggingState.columns);
+      
+      // Initialize command logging alongside data logging
+      initializeCommandLogging();
+    }
+    
+    // Log the structured data
+    if (loggingState.type === 'csv' && loggingState.csvWriter) {
+      loggingState.csvWriter.writeRecords([logEntry]).catch(err => {
+        console.error('CSV write error:', err);
+      });
+    } else if (loggingState.type === 'sqlite' && loggingState.insertStmt) {
+      const values = loggingState.columns.map(col => logEntry[col] || null);
+      loggingState.insertStmt.run(...values);
+    }
+    
+  } catch (error) {
+    console.error('Channel data logging error:', error);
+  }
+}
+
 function handleDataLogging(dataString) {
   try {
     // Clean up the data string - remove line breaks and extra whitespace
@@ -276,6 +397,53 @@ function handleDataLogging(dataString) {
   } catch (error) {
     console.error('Data logging error:', error);
   }
+}
+
+// Initialize command logging
+function initializeCommandLogging() {
+  if (!loggingState.isLogging || !loggingState.filename) return;
+  
+  // Create command log filename with prepend_cmd prefix
+  const baseName = loggingState.filename.replace(/\.[^/.]+$/, ""); // Remove extension
+  const extension = loggingState.filename.split('.').pop();
+  loggingState.cmdLogFile = `${baseName}_prepend_cmd.${extension}`;
+  
+  // Create command log CSV writer
+  const cmdHeaders = [
+    { id: 'unixtime', title: 'unixtime' },
+    { id: 'timestamp', title: 'timestamp' },
+    { id: 'command', title: 'command' },
+    { id: 'source', title: 'source' },
+    { id: 'channel', title: 'channel' }
+  ];
+  
+  loggingState.cmdLogWriter = createCsvWriter({
+    path: loggingState.cmdLogFile,
+    header: cmdHeaders,
+    append: false
+  });
+  
+  console.log(`📝 Command logging initialized: ${loggingState.cmdLogFile}`);
+}
+
+// Log a command with Unix timestamp
+function logCommand(command, source = 'unknown', channel = null) {
+  if (!loggingState.isLogging || !loggingState.cmdLogWriter) return;
+  
+  const now = Date.now();
+  const unixTime = Math.floor(now / 1000);
+  
+  const cmdEntry = {
+    unixtime: unixTime,
+    timestamp: new Date(now).toISOString(),
+    command: command,
+    source: source,
+    channel: channel
+  };
+  
+  loggingState.cmdLogWriter.writeRecords([cmdEntry]).catch(err => {
+    console.error('Command log write error:', err);
+  });
 }
 
 // Initialize CSV logging
@@ -397,21 +565,31 @@ app.post('/start_csv_log', function(req, res) {
       return res.status(400).json({ error: 'Filename is required' });
     }
     
+    // Ensure data directory exists
+    const fs = require('fs');
+    const dataDir = './data';
+    if (!fs.existsSync(dataDir)) {
+      fs.mkdirSync(dataDir, { recursive: true });
+    }
+    
     // Stop any current logging
     stopLogging();
+    
+    // Add data/ prefix if not already present
+    const fullFilename = filename.startsWith('./data/') ? filename : `./data/${filename}`;
     
     // Initialize CSV logging state
     loggingState.isLogging = true;
     loggingState.type = 'csv';
-    loggingState.filename = filename;
+    loggingState.filename = fullFilename;
     loggingState.columns = columns || [];
     loggingState.schemaDetected = false;
     loggingState.csvWriter = null;
     
-    console.log(`Started CSV logging to: ${filename}`);
+    console.log(`Started CSV logging to: ${fullFilename}`);
     res.json({ 
       success: true, 
-      message: `CSV logging started to ${filename}`,
+      message: `CSV logging started to ${fullFilename}`,
       columns: loggingState.columns 
     });
   } catch (error) {
@@ -429,23 +607,33 @@ app.post('/start_sqlite_log', function(req, res) {
       return res.status(400).json({ error: 'Filename and table name are required' });
     }
     
+    // Ensure data directory exists
+    const fs = require('fs');
+    const dataDir = './data';
+    if (!fs.existsSync(dataDir)) {
+      fs.mkdirSync(dataDir, { recursive: true });
+    }
+    
     // Stop any current logging
     stopLogging();
+    
+    // Add data/ prefix if not already present
+    const fullFilename = filename.startsWith('./data/') ? filename : `./data/${filename}`;
     
     // Initialize SQLite logging state
     loggingState.isLogging = true;
     loggingState.type = 'sqlite';
-    loggingState.filename = filename;
+    loggingState.filename = fullFilename;
     loggingState.tableName = table;
     loggingState.columns = columns || [];
     loggingState.schemaDetected = false;
     loggingState.db = null;
     loggingState.insertStmt = null;
     
-    console.log(`Started SQLite logging to: ${filename}, table: ${table}`);
+    console.log(`Started SQLite logging to: ${fullFilename}, table: ${table}`);
     res.json({ 
       success: true, 
-      message: `SQLite logging started to ${filename}, table: ${table}`,
+      message: `SQLite logging started to ${fullFilename}, table: ${table}`,
       columns: loggingState.columns 
     });
   } catch (error) {
@@ -496,6 +684,8 @@ function stopLogging() {
   loggingState.columns = [];
   loggingState.schemaDetected = false;
   loggingState.csvWriter = null;
+  loggingState.cmdLogWriter = null;
+  loggingState.cmdLogFile = null;
   
   console.log('Logging stopped and resources cleaned up');
 }
@@ -515,71 +705,163 @@ io.on('connection', function(socket){
   // WebSocket connection established
 });
 
-// Parse streaming data from serial buffer for battery cycler
-function parseCyclerStreamingData(dataString) {
+// Array-based battery cycling - uses ch1/ch2 data arrays instead of real-time stream
+function processArrayBasedCycling(channel = null) {
   if (!cyclerState.isRunning || cyclerState.isPaused) return;
   
-  try {
-    // Filter out non-measurement data
-    // Skip timestamps (contain : or large numbers like unix timestamps)
-    if (dataString.includes(':') || /^\d{10,}$/.test(dataString.trim())) {
-      return; // Skip timestamp data
+  // Determine which channel to process
+  const targetChannel = channel || cyclerState.channel;
+  if (!targetChannel) return;
+  
+  // Get the appropriate data array
+  const dataArray = targetChannel === 1 ? ch1 : ch2;
+  if (dataArray.length === 0) return;
+  
+  // Get the most recent data point
+  const latestData = dataArray[dataArray.length - 1];
+  const voltage = latestData.voltage_V;
+  const current = latestData.current_A;
+  const timestamp = latestData.time_ms;
+  
+  // Store the latest data for reference
+  cyclerState.lastStreamingData = {
+    voltage: voltage,
+    current: current, 
+    timestamp: timestamp
+  };
+  
+  console.log(`Array-based cycler (CH${targetChannel}): ${voltage.toFixed(6)}V, ${current.toExponential(6)}A`);
+  
+  // Process the data for logging and cutoff checking
+  processCyclerDataFromArray(voltage, current, timestamp, targetChannel, dataArray);
+}
+
+// Enhanced data processing with array-based analysis capabilities
+function processCyclerDataFromArray(voltage, current, timestamp, channel, dataArray) {
+  const now = timestamp;
+  const stepTime = (now - cyclerState.stepStartTime) / 1000;
+  const totalTime = (now - cyclerState.startTime) / 1000;
+  
+  // Update Ah integration
+  updateAhIntegration(current, now);
+  
+  // Array-based analysis: calculate trends, averages, etc.
+  const arrayAnalysis = performArrayAnalysis(dataArray, cyclerState.stepStartTime);
+  
+  // Create enhanced data point with array analysis
+  const dataPoint = {
+    timestamp: new Date(now).toISOString(),
+    cycle: cyclerState.currentCycle,
+    step: cyclerState.currentStepIndex,
+    step_type: cyclerState.currentStep ? cyclerState.currentStep.mode : 'unknown',
+    step_time: stepTime,
+    total_time: totalTime,
+    voltage: voltage,
+    current: current,
+    step_ah: cyclerState.stepAh,
+    cycle_ah: cyclerState.cycleAh,
+    total_ah: cyclerState.totalAh,
+    channel: channel,
+    // Array-based metrics
+    voltage_trend: arrayAnalysis.voltageTrend,
+    current_stability: arrayAnalysis.currentStability,
+    step_avg_voltage: arrayAnalysis.stepAvgVoltage,
+    step_avg_current: arrayAnalysis.stepAvgCurrent,
+    data_points_in_step: arrayAnalysis.dataPointsInStep
+  };
+  
+  cyclerState.stepData.push(dataPoint);
+  
+  // Write to SQLite database if logging enabled
+  if (cyclerState.cyclerDataStmt) {
+    try {
+      cyclerState.cyclerDataStmt.run(
+        dataPoint.timestamp,
+        now,
+        dataPoint.cycle,
+        dataPoint.step,
+        dataPoint.step_type,
+        dataPoint.step_time,
+        dataPoint.total_time,
+        dataPoint.voltage,
+        dataPoint.current,
+        dataPoint.step_ah,
+        dataPoint.cycle_ah,
+        dataPoint.total_ah,
+        null, // temperature_c
+        JSON.stringify(arrayAnalysis) // Store array analysis as JSON
+      );
+    } catch (err) {
+      console.error('Cycler SQLite write error:', err);
     }
-    
-    // Skip command responses and status messages
-    if (dataString.includes('OK') || dataString.includes('ERROR') || 
-        dataString.includes('MEAS') || dataString.includes('SOUR') ||
-        dataString.includes('OUTP') || dataString.length > 50) {
-      return; // Skip command acknowledgments and long messages
-    }
-    
-    let voltage = null;
-    let current = null;
-    
-    // Check if data looks like voltage,current format (e.g., "3.345,0.0123" or "3.836209,9.659207e-10")
-    if (dataString.includes(',')) {
-      const parts = dataString.split(',');
-      if (parts.length === 2) {
-        const v = parseFloat(parts[0].trim());
-        const i = parseFloat(parts[1].trim());
-        
-        // Validate reasonable ranges for battery measurements
-        if (!isNaN(v) && !isNaN(i) && 
-            Math.abs(v) >= 0.1 && Math.abs(v) <= 50 && // Voltage range 0.1V to 50V
-            Math.abs(i) <= 100) { // Current range up to 100A
-          voltage = v;
-          current = i;
-        }
-      }
-    }
-    // Check if data looks like a single voltage value (for OCV/REST)
-    else {
-      const v = parseFloat(dataString.trim());
-      if (!isNaN(v) && v >= 0.1 && v <= 50) { // Reasonable voltage range for batteries
-        voltage = v;
-        current = 0; // Assume zero current for voltage-only measurements
-      }
-    }
-    
-    // If we got valid measurement data, process it
-    if (voltage !== null) {
-      // Store the latest streaming data
-      cyclerState.lastStreamingData = {
-        voltage: voltage,
-        current: current,
-        timestamp: Date.now()
-      };
-      
-      console.log(`Cycler measurement: ${voltage.toFixed(6)}V, ${current.toExponential(6)}A`);
-      
-      // Process the data for logging and cutoff checking
-      processCyclerData(voltage, current);
-    }
-    
-  } catch (error) {
-    // Ignore parsing errors - not all serial data is measurement data
-    console.log(`Skipping unparseable data: "${dataString}"`);
   }
+  
+  // Also write to CSV for compatibility
+  if (cyclerState.cyclerCsvWriter) {
+    cyclerState.cyclerCsvWriter.writeRecords([dataPoint]).catch(err => {
+      console.error('Cycler CSV write error:', err);
+    });
+  }
+  
+  // Emit real-time data with enhanced array analysis
+  io.emit('cycler_data', dataPoint);
+  
+  // Check cutoff conditions using both current data and array analysis
+  if (cyclerState.currentStep) {
+    console.log(`Checking cutoffs - Step: ${cyclerState.currentStep.mode}, V: ${voltage.toFixed(4)}V, I: ${current.toExponential(4)}A, Time: ${stepTime.toFixed(1)}s`);
+    if (checkStepCutoffsWithArrayAnalysis(voltage, current, stepTime, arrayAnalysis)) {
+      console.log(`✓ Cutoff triggered! Advancing to next step.`);
+      advanceToNextStep();
+    }
+  }
+}
+
+// Perform analysis on data arrays for enhanced cycling logic
+function performArrayAnalysis(dataArray, stepStartTime) {
+  // Filter data points for current step only
+  const stepData = dataArray.filter(point => point.time_ms >= stepStartTime);
+  
+  if (stepData.length === 0) {
+    return {
+      voltageTrend: 0,
+      currentStability: 0,
+      stepAvgVoltage: 0,
+      stepAvgCurrent: 0,
+      dataPointsInStep: 0
+    };
+  }
+  
+  // Calculate averages
+  const avgVoltage = stepData.reduce((sum, point) => sum + point.voltage_V, 0) / stepData.length;
+  const avgCurrent = stepData.reduce((sum, point) => sum + point.current_A, 0) / stepData.length;
+  
+  // Calculate voltage trend (slope over last 10 points or all if fewer)
+  const trendPoints = stepData.slice(-Math.min(10, stepData.length));
+  let voltageTrend = 0;
+  if (trendPoints.length >= 2) {
+    const firstPoint = trendPoints[0];
+    const lastPoint = trendPoints[trendPoints.length - 1];
+    const deltaTime = (lastPoint.time_ms - firstPoint.time_ms) / 1000; // seconds
+    const deltaVoltage = lastPoint.voltage_V - firstPoint.voltage_V;
+    voltageTrend = deltaTime > 0 ? deltaVoltage / deltaTime : 0; // V/s
+  }
+  
+  // Calculate current stability (coefficient of variation)
+  let currentStability = 0;
+  if (stepData.length >= 2) {
+    const currentStdDev = Math.sqrt(
+      stepData.reduce((sum, point) => sum + Math.pow(point.current_A - avgCurrent, 2), 0) / stepData.length
+    );
+    currentStability = Math.abs(avgCurrent) > 1e-9 ? currentStdDev / Math.abs(avgCurrent) : 0;
+  }
+  
+  return {
+    voltageTrend: voltageTrend,           // V/s - positive means increasing
+    currentStability: currentStability,   // Coefficient of variation (0 = stable, higher = less stable)
+    stepAvgVoltage: avgVoltage,          // Average voltage for this step
+    stepAvgCurrent: avgCurrent,          // Average current for this step  
+    dataPointsInStep: stepData.length    // Number of data points collected in this step
+  };
 }
 
 
@@ -655,6 +937,15 @@ function writeout(s,le="\r\n")
 {
   //console.log(`[SERIAL OUT] ${s}`);
   serialPort.write(s+le);
+  
+  // Log command if logging is active
+  if (loggingState.isLogging) {
+    // Extract channel number from command if present (e.g., SOUR1:CURR -> channel 1)
+    const channelMatch = s.match(/(?:SOUR|MEAS|OUTP)(\d+)/);
+    const channel = channelMatch ? parseInt(channelMatch[1]) : null;
+    
+    logCommand(s, 'smu_function', channel);
+  }
 }
 
 
@@ -706,14 +997,22 @@ function set_mode(ch,mode) {
 
 function set_current(ch,cur)
 {
-  if (smuState.channels[ch].mode !=  "FIMV") set_mode(ch,'FIMV');
+  console.log(`🔧 set_current(${ch}, ${cur}) - Current mode: ${smuState.channels[ch].mode}`);
+  if (smuState.channels[ch].mode !=  "FIMV") {
+    console.log(`🔧 Switching to FIMV mode for current control`);
+    set_mode(ch,'FIMV');
+  }
+  console.log(`🔧 Sending command: SOUR${ch}:CURR ${cur}`);
   writeout(`SOUR${ch}:CURR ${cur}`);
   smuState.channels[ch].current = cur;
+  console.log(`🔧 State updated - channel ${ch} current set to ${cur}A`);
 }
 
 function set_potential(ch,pot)
 {
-  if (smuState.channels[ch].mode !=  "FVMI") set_mode(ch,'FVMI');
+  if (smuState.channels[ch].mode !=  "FVMI") {
+    set_mode(ch,'FVMI');
+  }
   writeout(`SOUR${ch}:VOLT ${pot}`);
   smuState.channels[ch].potential = pot;
 }
@@ -1092,6 +1391,93 @@ app.get("/smu/state", (req,res) => {
   }
 })
 
+// Data Array Access Endpoints
+app.get("/data/ch1", (req,res) => {
+  try {
+    const limit = req.query.limit ? parseInt(req.query.limit) : ch1.length;
+    const offset = req.query.offset ? parseInt(req.query.offset) : 0;
+    
+    const startIndex = Math.max(0, ch1.length - limit - offset);
+    const endIndex = Math.max(0, ch1.length - offset);
+    
+    res.json({
+      channel: 1,
+      total_points: ch1.length,
+      returned_points: endIndex - startIndex,
+      offset: offset,
+      data: ch1.slice(startIndex, endIndex)
+    });
+  } catch (error) {
+    console.error('Error getting CH1 data:', error);
+    res.status(500).json({ error: 'Failed to get CH1 data' });
+  }
+})
+
+app.get("/data/ch2", (req,res) => {
+  try {
+    const limit = req.query.limit ? parseInt(req.query.limit) : ch2.length;
+    const offset = req.query.offset ? parseInt(req.query.offset) : 0;
+    
+    const startIndex = Math.max(0, ch2.length - limit - offset);
+    const endIndex = Math.max(0, ch2.length - offset);
+    
+    res.json({
+      channel: 2,
+      total_points: ch2.length,
+      returned_points: endIndex - startIndex,
+      offset: offset,
+      data: ch2.slice(startIndex, endIndex)
+    });
+  } catch (error) {
+    console.error('Error getting CH2 data:', error);
+    res.status(500).json({ error: 'Failed to get CH2 data' });
+  }
+})
+
+// Combined data analysis endpoint
+app.get("/data/analysis", (req,res) => {
+  try {
+    const channel = parseInt(req.query.channel) || 1;
+    const dataArray = channel === 1 ? ch1 : ch2;
+    
+    if (dataArray.length === 0) {
+      return res.json({
+        channel: channel,
+        analysis: null,
+        message: "No data available"
+      });
+    }
+    
+    // Perform analysis on entire array
+    const analysis = performArrayAnalysis(dataArray, 0); // Analyze all data
+    
+    // Additional statistics
+    const latest = dataArray[dataArray.length - 1];
+    const oldest = dataArray[0];
+    const timeSpan = latest.time_ms - oldest.time_ms;
+    
+    res.json({
+      channel: channel,
+      total_points: dataArray.length,
+      time_span_ms: timeSpan,
+      time_span_hours: timeSpan / (1000 * 3600),
+      latest_data: latest,
+      analysis: analysis,
+      voltage_range: {
+        min: Math.min(...dataArray.map(p => p.voltage_V)),
+        max: Math.max(...dataArray.map(p => p.voltage_V))
+      },
+      current_range: {
+        min: Math.min(...dataArray.map(p => p.current_A)),
+        max: Math.max(...dataArray.map(p => p.current_A))
+      }
+    });
+  } catch (error) {
+    console.error('Error getting data analysis:', error);
+    res.status(500).json({ error: 'Failed to get data analysis' });
+  }
+})
+
 // ============================================================================
 // SMU DOCUMENTATION WEB INTERFACE
 // ============================================================================
@@ -1388,8 +1774,16 @@ function validateCyclerSteps(steps) {
 function initializeCyclerLogging(testMetadata = {}) {
   if (cyclerState.cyclerLogFile) {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const sqliteFilename = `battery_test_${timestamp}.db`;
-    const csvFilename = `battery_test_${timestamp}.csv`;
+    const batteryDir = './data/battery';
+    
+    // Ensure battery log directory exists
+    const fs = require('fs');
+    if (!fs.existsSync(batteryDir)) {
+      fs.mkdirSync(batteryDir, { recursive: true });
+    }
+    
+    const sqliteFilename = `${batteryDir}/battery_test_${timestamp}.db`;
+    const csvFilename = `${batteryDir}/battery_test_${timestamp}.csv`;
     
     // Create SQLite database
     cyclerState.cyclerDb = new sqlite3.Database(sqliteFilename);
@@ -1512,10 +1906,63 @@ function determineCVDirection(stepVoltage, currentVoltage, initialCurrent) {
   return 0;
 }
 
-// Check if current step cutoff conditions are met
+// Enhanced cutoff checking using array analysis
+function checkStepCutoffsWithArrayAnalysis(voltage, current, stepTime, arrayAnalysis) {
+  const step = cyclerState.currentStep;
+  if (!step) return false;
+  
+  // Use standard cutoff logic as base
+  const standardCutoff = checkStepCutoffs(voltage, current, stepTime);
+  if (standardCutoff) return true;
+  
+  // Enhanced array-based cutoffs
+  
+  // Voltage trend analysis for better CV step endings
+  if (step.mode === 'cv' && step.cutoff_A !== undefined) {
+    // If voltage trend is very stable and current is near cutoff, end step
+    if (Math.abs(arrayAnalysis.voltageTrend) < 0.001 && // V/s - very stable voltage
+        Math.abs(current) <= Math.abs(step.cutoff_A) * 1.1) { // Within 110% of cutoff current
+      console.log(`Enhanced CV cutoff: stable voltage trend (${arrayAnalysis.voltageTrend.toExponential(3)} V/s) and current near target`);
+      return true;
+    }
+  }
+  
+  // Current stability analysis for CC steps
+  if (step.mode === 'cc' && arrayAnalysis.currentStability < 0.05) { // Very stable current
+    // If we've reached a voltage plateau with stable current, check if we should end
+    if (Math.abs(arrayAnalysis.voltageTrend) < 0.0001 && arrayAnalysis.dataPointsInStep > 20) {
+      console.log(`Enhanced CC cutoff: voltage plateau detected with stable current`);
+      // Still need to meet at least one cutoff condition
+      return false; // Let standard cutoffs handle this
+    }
+  }
+  
+  // Capacity-based enhanced cutoffs
+  if (step.cutoff_Ah !== undefined && arrayAnalysis.dataPointsInStep > 10) {
+    // Use more accurate step-based Ah calculation
+    const stepAh = Math.abs(cyclerState.stepAh);
+    if (stepAh >= Math.abs(step.cutoff_Ah)) {
+      console.log(`Enhanced capacity cutoff: ${stepAh.toFixed(6)} Ah >= ${Math.abs(step.cutoff_Ah)} Ah`);
+      return true;
+    }
+  }
+  
+  return false;
+}
+
+// Check if current step cutoff conditions are met (original function)
 function checkStepCutoffs(voltage, current, stepTime) {
   const step = cyclerState.currentStep;
   if (!step) return false;
+  
+  console.log(`  → Checking cutoffs for ${step.mode} step:`, {
+    voltage: voltage.toFixed(4),
+    current: current.toExponential(4), 
+    stepTime: stepTime.toFixed(1),
+    cutoff_V: step.cutoff_V,
+    cutoff_A: step.cutoff_A,
+    cutoff_time_s: step.cutoff_time_s
+  });
   
   // Voltage cutoffs (same for all modes)
   if (step.cutoff_V !== undefined) {
@@ -1527,10 +1974,23 @@ function checkStepCutoffs(voltage, current, stepTime) {
         return true;
       }
     } else if (step.mode === 'cv') {
-      // CV mode: voltage should be held constant, cutoff_V acts as tolerance check
-      if (Math.abs(voltage - step.voltage) > Math.abs(step.cutoff_V)) {
-        console.log(`CV voltage tolerance exceeded: ${voltage}V (target: ${step.voltage}V, tolerance: ${step.cutoff_V}V)`);
-        return true;
+      // CV mode: directional voltage cutoff based on charging/discharging
+      // Determine if this is a charging or discharging CV step
+      const isChargingCV = cyclerState.stepData.length > 0 ? 
+        cyclerState.stepData.some(d => d.current > 0) : step.voltage > 3.5; // Assume >3.5V is charging
+      
+      if (isChargingCV) {
+        // Charging CV: end if voltage drops below cutoff (indicates capacity limit reached)
+        if (voltage <= step.cutoff_V) {
+          console.log(`CV charging voltage cutoff reached: ${voltage}V dropped below ${step.cutoff_V}V`);
+          return true;
+        }
+      } else {
+        // Discharging CV: end if voltage rises above cutoff (indicates load removed)
+        if (voltage >= step.cutoff_V) {
+          console.log(`CV discharging voltage cutoff reached: ${voltage}V rose above ${step.cutoff_V}V`);
+          return true;
+        }
       }
     }
   }
@@ -1743,6 +2203,10 @@ function advanceToNextStep() {
     // Valid step found
     cyclerState.currentStep = nextStep;
     console.log(`Starting step ${cyclerState.currentStepIndex}: ${nextStep.mode}`);
+    console.log(`Step definition:`, JSON.stringify(nextStep, null, 2));
+    
+    // Execute the new step
+    executeCurrentStep();
     return;
   }
   
@@ -1799,6 +2263,7 @@ function startCycler(channel, steps, cycles = 0, enableLogging = true, testMetad
   
   console.log(`Cycler started on channel ${channel}, ${cycles || 'infinite'} cycles`);
   console.log(`Found ${steps.length} total steps`);
+  console.log(`All steps:`, JSON.stringify(steps, null, 2));
   console.log(`Starting at step index: ${cyclerState.currentStepIndex}`);
   console.log(`Current step:`, cyclerState.currentStep);
   console.log(`First step: ${cyclerState.currentStep ? cyclerState.currentStep.mode : 'UNDEFINED'}`);
@@ -2008,6 +2473,141 @@ app.post('/cycler/validate', (req, res) => {
   } catch (error) {
     console.error('Step validation error:', error);
     res.status(400).json({ error: error.message });
+  }
+});
+
+// Array-based cycler analysis endpoints
+app.get('/cycler/step_analysis', (req, res) => {
+  try {
+    if (!cyclerState.isRunning) {
+      return res.json({ 
+        error: 'Cycler not running',
+        analysis: null 
+      });
+    }
+    
+    const channel = cyclerState.channel;
+    const dataArray = channel === 1 ? ch1 : ch2;
+    
+    if (dataArray.length === 0) {
+      return res.json({
+        error: 'No data available',
+        analysis: null
+      });
+    }
+    
+    // Get analysis for current step
+    const stepAnalysis = performArrayAnalysis(dataArray, cyclerState.stepStartTime);
+    
+    res.json({
+      channel: channel,
+      current_cycle: cyclerState.currentCycle,
+      current_step: cyclerState.currentStepIndex,
+      step_type: cyclerState.currentStep?.mode || 'unknown',
+      step_time_s: (Date.now() - cyclerState.stepStartTime) / 1000,
+      step_analysis: stepAnalysis,
+      step_ah: cyclerState.stepAh,
+      cycle_ah: cyclerState.cycleAh,
+      total_ah: cyclerState.totalAh
+    });
+    
+  } catch (error) {
+    console.error('Error getting step analysis:', error);
+    res.status(500).json({ error: 'Failed to get step analysis' });
+  }
+});
+
+app.get('/cycler/performance_metrics', (req, res) => {
+  try {
+    if (!cyclerState.isRunning) {
+      return res.json({ 
+        error: 'Cycler not running',
+        metrics: null 
+      });
+    }
+    
+    const channel = cyclerState.channel;
+    const dataArray = channel === 1 ? ch1 : ch2;
+    
+    if (dataArray.length === 0) {
+      return res.json({
+        error: 'No data available',
+        metrics: null
+      });
+    }
+    
+    // Calculate performance metrics from entire run
+    const startTime = cyclerState.startTime;
+    const runData = dataArray.filter(point => point.time_ms >= startTime);
+    
+    if (runData.length === 0) {
+      return res.json({
+        error: 'No run data available',
+        metrics: null
+      });
+    }
+    
+    // Calculate metrics
+    const totalRunTime = (Date.now() - startTime) / 1000; // seconds
+    const avgPower = runData.reduce((sum, point) => 
+      sum + (point.voltage_V * point.current_A), 0) / runData.length;
+    
+    const energyWh = runData.reduce((sum, point, index) => {
+      if (index === 0) return sum;
+      const prevPoint = runData[index - 1];
+      const deltaTime = (point.time_ms - prevPoint.time_ms) / (1000 * 3600); // hours
+      const avgPowerW = (point.voltage_V * point.current_A + 
+                        prevPoint.voltage_V * prevPoint.current_A) / 2;
+      return sum + (avgPowerW * deltaTime);
+    }, 0);
+    
+    res.json({
+      channel: channel,
+      total_runtime_s: totalRunTime,
+      total_runtime_h: totalRunTime / 3600,
+      current_cycle: cyclerState.currentCycle,
+      total_cycles_planned: cyclerState.totalCycles,
+      completion_percentage: cyclerState.totalCycles > 0 ? 
+        (cyclerState.currentCycle / cyclerState.totalCycles) * 100 : 0,
+      metrics: {
+        total_ah: cyclerState.totalAh,
+        cycle_ah: cyclerState.cycleAh,
+        avg_power_w: avgPower,
+        total_energy_wh: energyWh,
+        data_points_collected: runData.length,
+        avg_data_rate: runData.length / totalRunTime // points per second
+      }
+    });
+    
+  } catch (error) {
+    console.error('Error getting performance metrics:', error);
+    res.status(500).json({ error: 'Failed to get performance metrics' });
+  }
+});
+
+// Force manual array-based processing (for testing/debugging)
+app.post('/cycler/process_arrays', (req, res) => {
+  try {
+    if (!cyclerState.isRunning) {
+      return res.json({ 
+        error: 'Cycler not running',
+        processed: false 
+      });
+    }
+    
+    const channel = cyclerState.channel;
+    processArrayBasedCycling(channel);
+    
+    res.json({
+      message: 'Array-based processing triggered',
+      channel: channel,
+      processed: true,
+      timestamp: Date.now()
+    });
+    
+  } catch (error) {
+    console.error('Error processing arrays:', error);
+    res.status(500).json({ error: 'Failed to process arrays' });
   }
 });
 
