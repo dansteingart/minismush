@@ -240,6 +240,47 @@ class SMUClient(BaseClient):
     def disable_wifi(self) -> Dict:
         """Disable WiFi connection"""
         return self._request('POST', '/smu/disable_wifi')
+    
+    # Data Logging
+    def start_csv_log(self, filename: str, channels: Optional[List[int]] = None) -> Dict:
+        """
+        Start CSV logging with enhanced dual logging system
+        
+        Args:
+            filename: Base filename (without extension)
+            channels: List of channels to log (optional)
+        
+        Returns:
+            Response dictionary with logging status
+        """
+        data = {'filename': filename}
+        if channels:
+            data['channels'] = channels
+        return self._request('POST', '/start_csv_log', data)
+    
+    def start_sqlite_log(self, filename: str, table: str = 'readings') -> Dict:
+        """
+        Start SQLite logging
+        
+        Args:
+            filename: Database filename (without extension)
+            table: Table name for data storage
+        
+        Returns:
+            Response dictionary with logging status
+        """
+        return self._request('POST', '/start_sqlite_log', {
+            'filename': filename,
+            'table': table
+        })
+    
+    def stop_log(self) -> Dict:
+        """Stop all active logging (data and command logs)"""
+        return self._request('POST', '/stop_log')
+    
+    def get_log_status(self) -> Dict:
+        """Get current logging status"""
+        return self._request('GET', '/log_status')
 
 
 class BatteryCycler(BaseClient):
